@@ -175,10 +175,16 @@ Ordinary group play is not restricted to these three owners. This change does
 not register `/managepoints` in the general command menus, and does not affect
 Cloudflare deployment or webhook configuration.
 
-A historical player who has no private association should run `/mypoints` once in each group
-with saved scores and then retry in private. This works without starting a new round or
-changing the balance. If an old group is inaccessible or its Telegram chat ID changed, the
-bot cannot reconstruct its former chat ID or associate those scores automatically.
+In private chat, `/mypoints` displays the requesting player's Telegram display name, one
+points balance, and number of wins without revealing a group title or repeating balances.
+If the user has one earned balance and another empty test-group record, the earned
+balance is preferred. If multiple balances exist, recent group activity is used
+when unambiguous; otherwise the user is asked to run `/mypoints` in the desired
+group first. Scores from different groups are never added together.
+
+A historical player who has no private association should run `/mypoints` once
+in the group with saved scores and then retry in private. Old points remain in
+the group Durable Object and are never migrated or reset by this change.
 
 ### Verify the production release
 

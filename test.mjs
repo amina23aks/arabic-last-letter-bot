@@ -347,6 +347,10 @@ test("private points read only the caller's current balances from indexed groups
   assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 40 نقطة\n\n🏆 مرات الفوز: 4");
   const otherStorage = f.bindings.get(String(other.id)).ctx.storage;
   await otherStorage.put("scores", { 10: { ...oldScores[10], points: 70, wins: 7 } });
+  // Two earned group balances are ambiguous until the player picks one in its group.
+  await privateMessage("/mypoints");
+  assert.match(f.last().text, /عندك أكثر من رصيد مختلف/);
+  await groupMessage(other, "/mypoints");
   await privateMessage("/mypoints");
   assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 70 نقطة\n\n🏆 مرات الفوز: 7");
   assert.doesNotMatch(f.last().text, /90 نقطة|110 نقطة/);
@@ -579,7 +583,8 @@ test("private management reads stored players and atomically applies individual 
   await press("تصفير النقاط مع إبقاء مرات الفوز");
   const confirm = menu.buttons().find(button => button.text === "تأكيد").callback_data;
   await menu.click(confirm, second, { id: second.id, type: "private" });
-  assert.match(f.last("answerCallbackQuery").text, /انتهت صلاحية/);
+  // Non-owner callbacks are blocked before checking the menu token or expiry.
+  assert.match(f.last("answerCallbackQuery").text, /غير متاحة/);
   assert.deepEqual(await f.storage.get("scores"), existing);
 
   // A Telegram failure after the commit leaves the same confirmation retryable.

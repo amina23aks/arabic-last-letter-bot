@@ -147,7 +147,7 @@ export default {
         };
         const scoreRequest = ["mypoints", "points"].includes(command.name);
         const message = scoreRequest && Number.isSafeInteger(userId) && userId > 0 && userId === chat.id
-          ? await privatePointsMessage(env, userId, msg.text.trim())
+          ? await privatePointsMessage(env, msg.from)
           : Object.hasOwn(replies, command.name) && replies[command.name];
         if (message) await telegram(env.BOT_TOKEN, "sendMessage", { chat_id: chat.id, text: message });
         return new Response("OK");
@@ -396,11 +396,17 @@ export class WordGame {
           return Response.json([...groups.values()]);
         }
         if (request.method === "PUT") {
-          const { id, title } = await request.json();
+          const { id, title, rememberActivity } = await request.json();
           if (!Number.isSafeInteger(id) || id >= 0) return new Response(null, { status: 400 });
           const key = `scoreGroup:${id}`;
+          const prior = await this.ctx.storage.get(key);
           const name = typeof title === "string" ? title.trim().replace(/\s+/g, " ").slice(0, 100) : "";
-          if (name || !await this.ctx.storage.get(key)) await this.ctx.storage.put(key, { id, title: name });
+          if (rememberActivity || name || !prior) {
+            await this.ctx.storage.put(key, {
+              id, title: name || prior?.title || "",
+              ...(rememberActivity ? { lastSeenAt: Date.now() } : prior?.lastSeenAt ? { lastSeenAt: prior.lastSeenAt } : {}),
+            });
+          }
           return new Response(null, { status: 204 });
         }
       }

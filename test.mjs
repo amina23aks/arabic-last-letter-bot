@@ -338,13 +338,13 @@ test("private points read only the caller's current balances from indexed groups
   f.restart();
   await privateMessage("/mypoints");
   assert.equal(f.last().chat_id, host.id);
-  assert.match(f.last().text, /مجموعة <أ>: 40 نقطة، مرات الفوز: 4/);
+  assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 40 نقطة\n\n🏆 مرات الفوز: 4");
   await privateMessage("/mypoints 10", second);
   assert.match(f.last().text, /لا توجد مجموعات/);
 
   await groupMessage(other, "/start");
   await privateMessage("/mypoints");
-  assert.match(f.last().text, /مجموعة ب: 0 نقطة، مرات الفوز: 0/);
+  assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 0 نقطة\n\n🏆 مرات الفوز: 0");
   const otherStorage = f.bindings.get(String(other.id)).ctx.storage;
   await otherStorage.put("scores", { 10: { ...oldScores[10], points: 70, wins: 7 } });
   await privateMessage("/mypoints");
@@ -650,7 +650,7 @@ test("private management reads stored players and atomically applies individual 
   await f.msg("/mypoints", second);
   assert.match(f.last().text, /0 نقطة\nمرات الفوز: 0/);
   await privateAdmin(f, second).send("/mypoints");
-  assert.match(f.last().text, /0 نقطة، مرات الفوز: 0/);
+  assert.match(f.last().text, /0 نقطة[\s\S]*مرات الفوز: 0/);
   assert.doesNotMatch(f.last().text, /50 نقطة/);
 });
 
@@ -675,5 +675,5 @@ test("private points report a failed group read while displaying available balan
   await privateAdmin(f).send("/mypoints");
   assert.match(f.last().text, /مجموعة محفوظة: 20 نقطة، مرات الفوز: 2/);
   assert.match(f.last().text, /تعذّر قراءة بعض الأرصدة/);
-  assert.doesNotMatch(f.last().text, /مجموعة متعذرة|لا توجد مجموعات/);
+  assert.doesNotMatch(f.last().text, /مجموعة متعذرة|مجموعة محفوظة|0 نقطة/);
 });

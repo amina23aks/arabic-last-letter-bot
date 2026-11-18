@@ -389,8 +389,9 @@ test("registration script replaces the scoped command lists on repeated runs", a
     if (token === undefined) delete process.env.BOT_TOKEN;
     else process.env.BOT_TOKEN = token;
   }
-  assert.deepEqual(requests.slice(0, 4), requests.slice(4));
+  assert.deepEqual(requests.slice(0, 5), requests.slice(5));
   assert.equal(requests[0][0], "getMe");
+  assert.deepEqual(requests[4], ["deleteMyCommands", { scope: { type: "default" } }]);
   const group = ["start", "mypoints", "leaderboard", "help"];
   const expected = {
     all_group_chats: group,
@@ -502,4 +503,169 @@ test("retired score commands and old reset buttons leave stored scores intact", 
   assert.match(f.last("answerCallbackQuery").text, /تعديل النقاط معطّل/);
   assert.deepEqual(await f.storage.get("scores"), scores);
   assert.deepEqual(await f.storage.get("scoreReset:101"), pendingReset);
+});
+
+function privateAdmin(f, from = host) {
+  const chat = { id: from.id, type: "private" };
+  const messageId = 100;
+  let callbackId = 0;
+  return {
+    send: text => f.webhook({ message: { chat, from, text } }),
+    buttons: () => (f.last("editMessageText") || f.last()).reply_markup.inline_keyboard.flat(),
+    click: (data, actor = from, target = chat) => f.webhook({
+      callback_query: {
+        id: String(++callbackId), from: actor, data,
+        message: { chat: target, message_id: messageId },
+      },
+    }),
+  };
+}
+
+test("owner authorization requires three distinct numeric IDs and a private chat", async t => {
+  const f = fixture(t, { POINTS_OWNER_IDS: "10,20,20" });
+  const claimedOwner = { ...host, username: "mefxyou" };
+  const menu = privateAdmin(f, claimedOwner);
+  await menu.send("/mytelegramid");
+  assert.match(f.last().text, /Telegram ID: 10/);
+  await menu.send("/managepoints");
+  assert.match(f.last().text, /غير متاحة/);
+  assert.equal(f.last().reply_markup, undefined);
+  await menu.click("mp:fake:apply");
+  assert.match(f.last("answerCallbackQuery").text, /غير متاحة/);
+});
+
+test("private management reads stored players and atomically applies individual changes", async t => {
+  const f = fixture(t, { POINTS_OWNER_IDS: "10,20,30" });
+  const outsider = { id: 99, username: "mefxyou" };
+  const existing = {
+    20: { user_id: 20, name: "لاعب قديم (@old_name)", points: 20, wins: 2 },
+    99: { user_id: 99, name: "لاعب آخر", points: 50, wins: 5 },
+  };
+  await f.storage.put("scores", existing);
+  await privateAdmin(f, outsider).send("/managepoints");
+  assert.match(f.last().text, /غير متاحة/);
+  assert.equal(f.last().reply_markup, undefined);
+  await f.msg("/managepoints");
+  assert.equal(f.last().chat_id, outsider.id);
+
+  // A historical group becomes selectable even if the owner has never played there.
+  await f.msg("/leaderboard");
+  const menu = privateAdmin(f);
+  await menu.send("/managepoints");
+  const groupButton = f.last().reply_markup.inline_keyboard[0][0].callback_data;
+  await menu.click(groupButton, outsider);
+  assert.match(f.last("answerCallbackQuery").text, /غير متاحة/);
+  await menu.click(groupButton, host, chat);
+  assert.match(f.last("answerCallbackQuery").text, /غير متاحة/);
+  await menu.click(groupButton);
+
+  const choosePlayer = async () => {
+    const btn = menu.buttons().find(button => button.text.endsWith("(20)"));
+    assert.ok(btn);
+    assert.doesNotMatch(btn.text, /@old_name/);
+    assert.ok(Buffer.byteLength(btn.callback_data) <= 64);
+    await menu.click(btn.callback_data);
+  };
+  const press = label => menu.click(menu.buttons().find(button => button.text === label).callback_data);
+  await choosePlayer();
+  assert.match(f.last("editMessageText").text, /20 نقطة، مرات الفوز: 2/);
+  await press("تصفير النقاط مع إبقاء مرات الفوز");
+  const confirm = menu.buttons().find(button => button.text === "تأكيد").callback_data;
+  await menu.click(confirm, second, { id: second.id, type: "private" });
+  assert.match(f.last("answerCallbackQuery").text, /انتهت صلاحية/);
+  assert.deepEqual(await f.storage.get("scores"), existing);
+
+  // A Telegram failure after the commit leaves the same confirmation retryable.
+  const log = t.mock.method(console, "error", () => {});
+  f.failTelegram(method => Response.json(
+    method === "editMessageText" ? { ok: false, error_code: 503 } : { ok: true, result: true },
+    { status: method === "editMessageText" ? 503 : 200 },
+  ));
+  assert.equal((await menu.click(confirm)).status, 500);
+  assert.equal(log.mock.callCount(), 1);
+  f.failTelegram(null);
+  f.restart();
+  const retryResponses = await Promise.all([menu.click(confirm), menu.click(confirm)]);
+  assert.ok(retryResponses.every(response => response.status === 200));
+  assert.deepEqual((await f.storage.get("scores"))[20], { ...existing[20], points: 0 });
+  const firstAudit = [...(await f.storage.list({ prefix: "pointsAdminAudit:" })).values()];
+  assert.equal(firstAudit.length, 1);
+  assert.deepEqual(firstAudit[0].before, { points: 20, wins: 2 });
+  assert.deepEqual(firstAudit[0].after, { points: 0, wins: 2 });
+  assert.equal(firstAudit[0].actor, host.id);
+  assert.equal(firstAudit[0].groupId, chat.id);
+
+  async function reopen() {
+    await menu.send("/managepoints");
+    await menu.click(f.last().reply_markup.inline_keyboard[0][0].callback_data);
+    await choosePlayer();
+  }
+  await reopen();
+  await press("إضافة نقاط");
+  await menu.send("17");
+  const addConfirmation = menu.buttons().find(button => button.text === "تأكيد").callback_data;
+  await Promise.all([menu.click(addConfirmation), menu.click(addConfirmation)]);
+  assert.equal((await f.storage.get("scores"))[20].points, 17);
+  await reopen();
+  assert.match(f.last("editMessageText").text, /17 نقطة، مرات الفوز: 2/);
+  await press("خصم نقاط");
+  await press("5");
+  await press("تأكيد");
+  await reopen();
+  assert.match(f.last("editMessageText").text, /12 نقطة، مرات الفوز: 2/);
+  await press("تصفير النقاط ومرات الفوز");
+  const expired = menu.buttons().find(button => button.text === "تأكيد").callback_data;
+  f.at(f.now() + 300_000);
+  await menu.click(expired);
+  assert.equal((await f.storage.get("scores"))[20].wins, 2);
+
+  await reopen();
+  await press("تصفير النقاط ومرات الفوز");
+  const current = await f.storage.get("scores");
+  current[20].points += 10;
+  current[20].wins += 1;
+  await f.storage.put("scores", current);
+  await press("تأكيد");
+  assert.match(f.last("editMessageText").text, /تغيّر رصيد اللاعب/);
+  assert.deepEqual(await f.storage.get("scores"), current);
+
+  await reopen();
+  await press("تصفير النقاط ومرات الفوز");
+  await press("تأكيد");
+  const adjusted = await f.storage.get("scores");
+  assert.deepEqual(adjusted[20], { ...existing[20], points: 0, wins: 0 });
+  assert.deepEqual(adjusted[99], existing[99]);
+  assert.equal((await f.storage.list({ prefix: "pointsAdminAudit:" })).size, 4);
+
+  await f.msg("/leaderboard");
+  assert.match(f.last().text, /لاعب قديم: 0 نقطة \(0 فوز\)/);
+  await f.msg("/mypoints", second);
+  assert.match(f.last().text, /0 نقطة\nمرات الفوز: 0/);
+  await privateAdmin(f, second).send("/mypoints");
+  assert.match(f.last().text, /0 نقطة، مرات الفوز: 0/);
+  assert.doesNotMatch(f.last().text, /50 نقطة/);
+});
+
+test("a stale private group link does not fabricate a zero", async t => {
+  const f = fixture(t);
+  await f.bindings.get(`player:${host.id}`).ctx.storage.put(`scoreGroup:${chat.id}`, { id: chat.id });
+  await privateAdmin(f).send("/mypoints");
+  assert.match(f.last().text, /لا توجد مجموعات/);
+  assert.doesNotMatch(f.last().text, /0 نقطة/);
+});
+
+test("private points report a failed group read while displaying available balances", async t => {
+  const f = fixture(t);
+  const playerStorage = f.bindings.get(`player:${host.id}`).ctx.storage;
+  await playerStorage.put(`scoreGroup:${chat.id}`, { id: chat.id, title: "مجموعة محفوظة" });
+  await playerStorage.put("scoreGroup:-999", { id: -999, title: "مجموعة متعذرة" });
+  await f.storage.put("scores", { 10: { points: 20, wins: 2 } });
+  const get = f.bindings.get;
+  t.mock.method(f.bindings, "get", id => id === "-999"
+    ? { fetch: async () => new Response(null, { status: 503 }) }
+    : get(id));
+  await privateAdmin(f).send("/mypoints");
+  assert.match(f.last().text, /مجموعة محفوظة: 20 نقطة، مرات الفوز: 2/);
+  assert.match(f.last().text, /تعذّر قراءة بعض الأرصدة/);
+  assert.doesNotMatch(f.last().text, /مجموعة متعذرة|لا توجد مجموعات/);
 });

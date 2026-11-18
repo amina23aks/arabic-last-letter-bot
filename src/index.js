@@ -1,4 +1,5 @@
-import { privatePointsMessage, rememberScoreGroup } from "./private-scores.js";
+import { adjustScore, isOwner, pointsAdminMenu, routePointsAdmin } from "./manage-points.js";
+import { privatePointsMessage, rememberLeaderboardGroup, rememberScoreGroup } from "./private-scores.js";
 import { help, parseCommand, welcome } from "./commands.js";
 import { telegram, telegramErrorDetails } from "./telegram.js";
 
@@ -126,16 +127,25 @@ export default {
       const msg = update.message;
       const callback = update.callback_query;
       const chat = msg?.chat || callback?.message?.chat;
+      if (callback?.data?.startsWith("mp:")) return await routePointsAdmin(env, update);
       if (chat?.type === "private" && msg?.text && !msg.from?.is_bot) {
         const command = parseCommand(msg.text.trim());
+        if (!command && /^\d+$/.test(msg.text.trim()) && isOwner(env, msg.from, chat)) {
+          return await routePointsAdmin(env, update);
+        }
         if (!command?.addressedHere) return new Response("OK");
+        if (command.name === "managepoints") return await routePointsAdmin(env, update);
+        const userId = msg.from?.id;
+        if (command.name === "mytelegramid" && Number.isSafeInteger(userId) && userId > 0 && userId === chat.id) {
+          await telegram(env.BOT_TOKEN, "sendMessage", { chat_id: chat.id, text: `Telegram ID: ${userId}` });
+          return new Response("OK");
+        }
         const replies = {
           start: welcome,
           help,
           rules: help,
         };
         const scoreRequest = ["mypoints", "points"].includes(command.name);
-        const userId = msg.from?.id;
         const message = scoreRequest && Number.isSafeInteger(userId) && userId > 0 && userId === chat.id
           ? await privatePointsMessage(env, userId, msg.text.trim())
           : Object.hasOwn(replies, command.name) && replies[command.name];
@@ -359,6 +369,27 @@ export class WordGame {
       }, { headers: { "Cache-Control": "no-store" } });
     }
     try {
+      if (path === "/points-admin" && request.method === "POST") {
+        const update = await request.json();
+        return await this.runExclusive(() => pointsAdminMenu(this.env, this.ctx.storage, update));
+      }
+      if (path === "/score-adjustment" && request.method === "POST") {
+        const change = await request.json();
+        return Response.json(await this.runExclusive(() => adjustScore(this.ctx.storage, change)));
+      }
+      if (path === "/score-players" && request.method === "GET") {
+        const scores = (await this.ctx.storage.get("scores")) || {};
+        const players = Object.entries(scores)
+          .map(([id, score]) => ({
+            id: Number(id),
+            name: cleanStoredName(score.name || `لاعب ${id}`),
+            points: score.points,
+            wins: score.wins,
+          }))
+          .filter(player => Number.isSafeInteger(player.id) && player.id > 0)
+          .sort((a, b) => b.points - a.points || b.wins - a.wins || a.id - b.id);
+        return Response.json(players.map(({ id, name }) => ({ id, name })));
+      }
       if (path === "/score-groups") {
         if (request.method === "GET") {
           const groups = await this.ctx.storage.list({ prefix: "scoreGroup:" });
@@ -387,11 +418,24 @@ export class WordGame {
     }
   }
 
+  async updateScoreIndex(chat, userId) {
+    const writes = [rememberLeaderboardGroup(this.env, chat)];
+    if (userId) writes.push(rememberScoreGroup(this.env, userId, chat));
+    const results = await Promise.allSettled(writes);
+    if (results.some(result => result.status === "rejected")) {
+      console.error("Could not update score index");
+      return false;
+    }
+    return true;
+  }
+
   async pointsMessage(from, chat) {
     const scores = (await this.ctx.storage.get("scores")) || {};
     const entry = scores[String(from.id)];
-    if (entry && !from.is_bot) await rememberScoreGroup(this.env, from.id, chat);
-    return `رصيد ${escapeHtml(display(from))}: ${entry?.points || 0} نقطة\nمرات الفوز: ${entry?.wins || 0}`;
+    const indexed = await this.updateScoreIndex(chat, entry && from.id);
+    const retry = indexed ? "" : "\nتعذّر تحديث الربط مع الخاص. أعد طلب /mypoints في المجموعة لاحقًا.";
+
+    return `رصيد ${escapeHtml(display(from))}: ${entry?.points || 0} نقطة\nمرات الفوز: ${entry?.wins || 0}${retry}`;
   }
 
   async handleUpdate(update) {
@@ -430,6 +474,7 @@ export class WordGame {
     let callbackText = "التسجيل مغلق حاليًا.";
     let closedMessage;
     let createdLobby = false;
+    let joinedLobby = false;
     let editedLobby = false;
     let expired = false;
 
@@ -486,7 +531,7 @@ export class WordGame {
         } else if (game.players.length >= MAX_PLAYERS) {
           callbackText = "وصلنا للحد الأقصى (30 لاعبًا).";
         } else {
-          await rememberScoreGroup(this.env, from.id, chat);
+          joinedLobby = true;
           game.players.push({ id: from.id, name: display(from), lives: MAX_LIVES });
           callbackText = "تم تسجيلك.";
           editedLobby = true;
@@ -516,6 +561,7 @@ export class WordGame {
       texts.push(await this.pointsMessage(from, chat));
     } else if (["playerpointendtostartgame", "leaderboard", "top"].includes(command)) {
       const scores = (await this.ctx.storage.get("scores")) || {};
+      await this.updateScoreIndex(chat);
       const ranking = Object.values(scores).sort((a, b) => b.points - a.points || b.wins - a.wins)
         .slice(0, 20);
       texts.push(ranking.length
@@ -555,7 +601,6 @@ export class WordGame {
     }
 
     if (createdLobby) {
-      await rememberScoreGroup(this.env, from.id, chat);
       // Publish the keyboard before committing a lobby that players need it to join.
       const message = await this.callTelegram("sendMessage", {
         chat_id: chat.id, text: lobbyMessage(game), reply_markup: lobbyKeyboard(game),
@@ -564,6 +609,7 @@ export class WordGame {
       game.deadline = Date.now() + REGISTRATION_MS;
     }
     await this.save(game);
+    if (createdLobby || joinedLobby) await this.updateScoreIndex(chat, from.id);
 
     if (callback) {
       await this.tryTelegram("answerCallbackQuery", {

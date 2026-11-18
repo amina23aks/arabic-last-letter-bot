@@ -3,7 +3,7 @@ import test from "node:test";
 import worker, { lifeIcons, WordGame } from "./src/index.js";
 
 const chat = { id: -987, type: "supergroup" };
-const host = { id: 10, first_name: "آمنة", username: "host_account" };
+const host = { id: 10, first_name: "آمنة", username: "mefxyou" };
 const second = { id: 20, first_name: "صنارة", last_name: "صيد <>&", username: "second_account" };
 const admin = { id: 30, first_name: "محمد" };
 const env = { BOT_TOKEN: "123:test-token", WEBHOOK_SECRET: "test-webhook" };
@@ -521,22 +521,30 @@ function privateAdmin(f, from = host) {
   };
 }
 
-test("owner authorization requires three distinct numeric IDs and a private chat", async t => {
-  const f = fixture(t, { POINTS_OWNER_IDS: "10,20,20" });
-  const claimedOwner = { ...host, username: "mefxyou" };
-  const menu = privateAdmin(f, claimedOwner);
-  await menu.send("/mytelegramid");
-  assert.match(f.last().text, /Telegram ID: 10/);
-  await menu.send("/managepoints");
-  assert.match(f.last().text, /غير متاحة/);
-  assert.equal(f.last().reply_markup, undefined);
-  await menu.click("mp:fake:apply");
+test("username owner authorization allows only three configured usernames in private", async t => {
+  const f = fixture(t);
+  for (const username of ["mefxyou", "Am23zu8", "i_lovezizi"]) {
+    const owner = { id: username === "mefxyou" ? 10 : username === "Am23zu8" ? 21 : 22, username };
+    const menu = privateAdmin(f, owner);
+    await menu.send("/managepoints");
+    assert.doesNotMatch(f.last().text, /غير متاحة/);
+  }
+  for (const username of ["other_user", "mefxyou_fake", undefined]) {
+    const person = { id: 98, username };
+    const menu = privateAdmin(f, person);
+    await menu.send("/managepoints");
+    assert.match(f.last().text, /غير متاحة/);
+    await menu.click("mp:fake:apply");
+    assert.match(f.last("answerCallbackQuery").text, /غير متاحة/);
+  }
+  const forgedGroup = privateAdmin(f, { id: 10, username: "mefxyou" });
+  await forgedGroup.click("mp:fake:apply", { id: 10, username: "mefxyou" }, chat);
   assert.match(f.last("answerCallbackQuery").text, /غير متاحة/);
 });
 
 test("private management reads stored players and atomically applies individual changes", async t => {
   const f = fixture(t, { POINTS_OWNER_IDS: "10,20,30" });
-  const outsider = { id: 99, username: "mefxyou" };
+  const outsider = { id: 99, username: "other_user" };
   const existing = {
     20: { user_id: 20, name: "لاعب قديم (@old_name)", points: 20, wins: 2 },
     99: { user_id: 99, name: "لاعب آخر", points: 50, wins: 5 },

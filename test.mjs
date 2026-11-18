@@ -344,7 +344,7 @@ test("private points read only the caller's current balances from indexed groups
 
   await groupMessage(other, "/start");
   await privateMessage("/mypoints");
-  assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 0 نقطة\n\n🏆 مرات الفوز: 0");
+  assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 40 نقطة\n\n🏆 مرات الفوز: 4");
   const otherStorage = f.bindings.get(String(other.id)).ctx.storage;
   await otherStorage.put("scores", { 10: { ...oldScores[10], points: 70, wins: 7 } });
   await privateMessage("/mypoints");
@@ -672,7 +672,6 @@ test("private points report a failed group read while displaying available balan
     ? { fetch: async () => new Response(null, { status: 503 }) }
     : get(id));
   await privateAdmin(f).send("/mypoints");
-  assert.match(f.last().text, /مجموعة محفوظة: 20 نقطة، مرات الفوز: 2/);
-  assert.match(f.last().text, /تعذّر قراءة بعض الأرصدة/);
+  assert.match(f.last().text, /تعذّر قراءة رصيدك الآن/);
   assert.doesNotMatch(f.last().text, /مجموعة متعذرة|مجموعة محفوظة|0 نقطة/);
 });

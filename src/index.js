@@ -1,4 +1,3 @@
-import { groupAccess, isGroupMember, isUserId } from "./access.js";
 import { help, parseCommand, welcome } from "./commands.js";
 import { telegram, telegramErrorDetails } from "./telegram.js";
 
@@ -9,12 +8,9 @@ const MAX_PLAYERS = 30;
 const MAX_WORD_LENGTH = 24;
 const WIN_POINTS = 10;
 const MAX_RECENT_REWARDS = 1000;
-const RESET_CONFIRM_MS = 300_000;
 const SCORE_COMMANDS = new Set(["addpoints", "removepoints", "setpoints", "resetpoints"]);
 const GROUP_POINTS_NOTICE = "📊 نقاطك محفوظة حسب المجموعة. افتح المجموعة واكتب /mypoints لمعرفة رصيدك.";
-const isNewerEvent = (event, previous) => Number.isSafeInteger(event.date) &&
-  Number.isSafeInteger(event.id) && (!previous || event.date > previous.date ||
-    (event.date === previous.date && event.id > previous.id));
+const SCORE_COMMANDS_DISABLED = "تعديل النقاط معطّل حاليًا.";
 const escapeHtml = text => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
 const newGame = () => ({
@@ -129,7 +125,7 @@ export default {
       const update = await request.json();
       const msg = update.message;
       const callback = update.callback_query;
-      const chat = msg?.chat || callback?.message?.chat || update.my_chat_member?.chat;
+      const chat = msg?.chat || callback?.message?.chat;
       if (chat?.type === "private" && msg?.text && !msg.from?.is_bot) {
         const command = parseCommand(msg.text.trim());
         if (!command?.addressedHere) return new Response("OK");
@@ -139,7 +135,6 @@ export default {
           rules: help,
           mypoints: GROUP_POINTS_NOTICE,
           points: GROUP_POINTS_NOTICE,
-          myid: isUserId(msg.from?.id) ? `معرّفك في تيليغرام: ${msg.from.id}` : null,
         };
         const message = Object.hasOwn(replies, command.name) && replies[command.name];
         if (message) await telegram(env.BOT_TOKEN, "sendMessage", { chat_id: chat.id, text: message });
@@ -331,7 +326,7 @@ export class WordGame {
   alarm() {
     return this.runExclusive(async () => {
       const game = await this.loadGame();
-      if (game.phase === "idle" || game.deadline == null || !await this.isApproved(game.chatId)) return;
+      if (game.phase === "idle" || game.deadline == null) return;
       const now = Date.now();
       if (now < game.deadline) {
         await this.ctx.storage.setAlarm(game.deadline);
@@ -361,8 +356,8 @@ export class WordGame {
         data: path === "/api/scores" ? Object.values(data) : data,
       }, { headers: { "Cache-Control": "no-store" } });
     }
-    const update = await request.json();
     try {
+      const update = await request.json();
       return await this.runExclusive(() => this.handleUpdate(update));
     } catch (error) {
       console.error("Game update failed", telegramErrorDetails(error));
@@ -376,153 +371,25 @@ export class WordGame {
     return `رصيد ${escapeHtml(display(from))}: ${entry?.points || 0} نقطة\nمرات الفوز: ${entry?.wins || 0}`;
   }
 
-  async isApproved(chatId, access = groupAccess(this.env)) {
-    return access && (access.groups.has(chatId) || await this.ctx.storage.get("groupApproved") === true);
-  }
-
-  async handleMembership(update) {
-    const { chat, from, old_chat_member, new_chat_member, date } = update.my_chat_member;
-    if (!["group", "supergroup"].includes(chat?.type)) return;
-    const access = groupAccess(this.env);
-    // Invalid configuration blocks group activity without removing the bot from any group.
-    if (!access) return;
-    const storage = this.ctx.storage;
-    const event = { date, id: update.update_id };
-    if (!isNewerEvent(event, await storage.get("groupAccessUpdate"))) return;
-    const wasMember = isGroupMember(old_chat_member);
-    const isMember = isGroupMember(new_chat_member);
-    if (wasMember === isMember) return;
-    const ownerAdded = !wasMember && isMember && !from?.is_bot && access.owners.has(from?.id);
-    if (!wasMember && isMember && !ownerAdded && !await this.isApproved(chat.id, access)) {
-      // Let Telegram retry the update if the leave request fails.
-      await this.callTelegram("leaveChat", { chat_id: chat.id });
-    }
-    await storage.transaction(async txn => {
-      if (ownerAdded) await txn.put("groupApproved", true);
-      await txn.put("groupAccessUpdate", event);
-    });
-  }
-
-  answerCallback(callback, text) {
-    return this.tryTelegram("answerCallbackQuery", { callback_query_id: callback.id, text });
-  }
-
-  async handleScoreUpdate(update, command, isOwner) {
-    const { message, callback_query: callback, update_id: updateId } = update;
-    const { chat } = message || callback.message;
-    const admin = message?.from || callback.from;
-    const respond = text => callback ? this.answerCallback(callback, text) : this.notify(chat.id, [text]);
-    if (!isOwner) {
-      await respond("هذا الإجراء متاح لمالكي البوت فقط.");
-      return;
-    }
-    if (!Number.isSafeInteger(updateId)) return;
-    const target = message?.reply_to_message?.from;
-    if (message && (!isUserId(target?.id) || target.is_bot || message.reply_to_message.sender_chat)) {
-      await respond("ردّ على رسالة اللاعب في هذه المجموعة واكتب الأمر مرة أخرى.");
-      return;
-    }
-
-    const storage = this.ctx.storage;
-    const pendingKey = `scoreReset:${admin.id}`;
-    const auditKey = `scoreAudit:${updateId}`;
-    const now = Date.now();
-    if (command === "resetpoints") {
-      const token = crypto.randomUUID();
-      const requestKey = `scoreResetRequest:${updateId}`;
-      const created = await storage.transaction(async txn => {
-        if (await txn.get(requestKey)) return false;
-        await txn.put(requestKey, true);
-        await txn.put(pendingKey, {
-          token, targetId: target.id, name: display(target), expiresAt: now + RESET_CONFIRM_MS,
-        });
-        return true;
-      });
-      if (created) await this.tryTelegram("sendMessage", {
-        chat_id: chat.id, text: `هل تريد تصفير رصيد ${display(target)}؟ ينتهي التأكيد بعد 5 دقائق.`,
-        reply_markup: { inline_keyboard: [[{
-          text: "تأكيد تصفير النقاط", callback_data: `resetpoints:${token}`,
-        }]] },
-      });
-      return;
-    }
-
-    const args = message?.text.trim().split(/\s+/).slice(1);
-    const amount = callback ? 0 : Number(args[0]);
-    if (message && (args.length !== 1 || !/^\d+$/.test(args[0]) || !Number.isSafeInteger(amount))) {
-      await respond("أدخل عددًا صحيحًا غير سالب بعد الأمر، مثل /addpoints 10.");
-      return;
-    }
-    const result = await storage.transaction(async txn => {
-      if (await txn.get(auditKey)) return { text: "تم تنفيذ هذا الطلب مسبقًا." };
-      const pending = callback ? await txn.get(pendingKey) : null;
-      if (callback && (!pending || callback.data !== `resetpoints:${pending.token}` || now >= pending.expiresAt)) {
-        return { text: "هذا التأكيد غير صالح أو انتهت صلاحيته." };
-      }
-      const targetId = pending?.targetId ?? target.id;
-      const name = pending?.name ?? display(target);
-      const scores = (await txn.get("scores")) || {};
-      const score = scores[targetId] || { user_id: targetId, name, points: 0, wins: 0 };
-      const previous = score.points;
-      const actions = {
-        addpoints: previous + amount,
-        removepoints: Math.max(0, previous - amount),
-        setpoints: amount,
-        resetpoints: 0,
-      };
-      const action = callback ? "resetpoints" : command;
-      const points = actions[action];
-      if (points > Number.MAX_SAFE_INTEGER - WIN_POINTS) return { text: "الرصيد المطلوب كبير جدًا." };
-      scores[targetId] = { ...score, name, points };
-      await txn.put("scores", scores);
-      await txn.put(auditKey, {
-        action, admin_id: admin.id, target_user_id: targetId, group_id: chat.id,
-        previous_points: previous, new_points: points,
-        timestamp: new Date(now).toISOString(), update_id: updateId,
-      });
-      if (callback) await txn.delete(pendingKey);
-      return { text: `تم تحديث الرصيد: ${points} نقطة.`, changed: true };
-    });
-    await respond(result.text);
-    if (callback && result.changed) await this.closeLobby(chat.id, callback.message.message_id);
-  }
-
   async handleUpdate(update) {
-    if (update.my_chat_member) {
-      await this.handleMembership(update);
-      return new Response("OK");
-    }
     const msg = update.message;
     const callback = update.callback_query;
     const chat = msg?.chat || callback?.message?.chat;
     const from = msg?.from || callback?.from;
-    if (!["group", "supergroup"].includes(chat?.type) || !isUserId(from?.id) || from.is_bot) return new Response("OK");
+    if (!["group", "supergroup"].includes(chat?.type) || !Number.isSafeInteger(from?.id) || from.id <= 0 || from.is_bot) return new Response("OK");
 
     const raw = (msg?.text || "").trim();
     const parsed = parseCommand(raw);
     if (parsed && !parsed.addressedHere) return new Response("OK");
     const command = parsed?.name;
-    const access = groupAccess(this.env);
-    const isOwner = !msg?.sender_chat && access?.owners.has(from.id);
-    if (command === "approvegroup" && isOwner) {
-      const storage = this.ctx.storage;
-      const event = { date: msg.date, id: update.update_id };
-      if (!isNewerEvent(event, await storage.get("groupAccessUpdate"))) return new Response("OK");
-      await storage.transaction(async txn => {
-        await txn.put("groupApproved", true);
-        await txn.put("groupAccessUpdate", event);
-        const game = await txn.get("game");
-        if (game?.phase !== "idle" && game?.deadline != null) await txn.setAlarm(game.deadline);
+    if (SCORE_COMMANDS.has(command)) {
+      await this.notify(chat.id, [SCORE_COMMANDS_DISABLED]);
+      return new Response("OK");
+    }
+    if (callback?.data?.startsWith("resetpoints:")) {
+      await this.tryTelegram("answerCallbackQuery", {
+        callback_query_id: callback.id, text: SCORE_COMMANDS_DISABLED,
       });
-      await this.notify(chat.id, ["تمت الموافقة على هذه المجموعة."]);
-      return new Response("OK");
-    }
-    if (!await this.isApproved(chat.id, access)) {
-      if (callback) await this.answerCallback(callback, "هذه المجموعة غير معتمدة.");
-      return new Response("OK");
-    }
-    if (SCORE_COMMANDS.has(command) || callback?.data?.startsWith("resetpoints:")) {
-      await this.handleScoreUpdate(update, command, isOwner);
       return new Response("OK");
     }
     let game = await this.loadGame();
@@ -632,7 +499,7 @@ export class WordGame {
     } else if (command === "status") {
       const left = Math.max(0, Math.ceil((game.deadline - now) / 1000));
       if (game.phase === "playing") {
-        texts.push(`الجولة مستمرة.\nالدور: ${escapeHtml(game.players[game.turnIndex].name)}\nالحرف: ${escapeHtml(game.requiredLetter || "حر")}\nالمتبقي: ${left} ثانية\n\n${scoreboard(game)}`);
+        texts.push(`الجولة مستمرة.\nالدور: ${escapeHtml(game.players[game.turnIndex].name)}\nالحرف: ${game.requiredLetter ? `<b>${escapeHtml(game.requiredLetter)}</b>` : "حر"}\nالمتبقي: ${left} ثانية\n\n${scoreboard(game)}`);
       } else if (game.phase === "lobby") {
         texts.push(`التسجيل مفتوح. عدد المسجلين: ${game.players.length}. الوقت المتبقي: ${left} ثانية.`);
       } else texts.push("لا توجد جولة حاليًا. اكتب /game.");
@@ -651,7 +518,7 @@ export class WordGame {
         const word = isWord(raw);
         if (!word) texts.push("اكتب كلمة عربية واحدة من حرفين إلى 24 حرفًا، بدون أرقام أو مسافات.");
         else if (game.requiredLetter && word[0] !== game.requiredLetter) {
-          texts.push(`لازم تبدأ الكلمة بحرف «${escapeHtml(game.requiredLetter)}». جرّب مرة أخرى قبل انتهاء الوقت.`);
+          texts.push(`لازم تبدأ الكلمة بحرف «<b>${escapeHtml(game.requiredLetter)}</b>». جرّب مرة أخرى قبل انتهاء الوقت.`);
         } else if (game.used.includes(word)) {
           texts.push("هذه الكلمة استُعملت من قبل. اختر كلمة أخرى.");
         } else {

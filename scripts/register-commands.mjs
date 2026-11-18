@@ -13,12 +13,13 @@ if (!token || !/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
     }
     for (const [type, commands] of [
       ["all_group_chats", groupCommands],
+      ["all_chat_administrators", groupCommands],
       ["all_private_chats", privateCommands],
     ]) {
       const registered = await telegram(token, "setMyCommands", { scope: { type }, commands });
       if (registered !== true) throw new Error("Registration was rejected");
     }
-    console.log("Registered Arabic commands for EndToStartBot group and private chats.");
+    console.log("Registered Arabic commands for @EndToStartBot in private chats, groups, and group administrator menus.");
   } catch {
     console.error("Registration failed. Check that the token belongs to EndToStartBot and that api.telegram.org is reachable.");
     process.exitCode = 1;

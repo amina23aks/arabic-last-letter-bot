@@ -6,7 +6,7 @@ const chat = { id: -987, type: "supergroup" };
 const host = { id: 10, first_name: "آمنة", username: "host_account" };
 const second = { id: 20, first_name: "صنارة", last_name: "صيد <>&", username: "second_account" };
 const admin = { id: 30, first_name: "محمد" };
-const env = { BOT_TOKEN: "123:test-token", WEBHOOK_SECRET: "test-webhook", ADMIN_USER_IDS: "101,102,103", APPROVED_GROUP_IDS: String(chat.id) };
+const env = { BOT_TOKEN: "123:test-token", WEBHOOK_SECRET: "test-webhook" };
 
 class Storage {
   data = new Map();
@@ -187,7 +187,8 @@ test("Arabic normalization, turn ownership, wrong letter and repeat handling", a
   assert.match(f.last().text, /اكتب كلمة تبدأ بحرف: <b>ب<\/b>/);
   assert.equal(f.last().parse_mode, "HTML");
   await f.msg("قلم", next);
-  assert.match(f.last().text, /لازم تبدأ/);
+  assert.ok(f.last().text.includes("«<b>ب</b>»"));
+  assert.equal(f.last().parse_mode, "HTML");
   await f.msg("بَدَأ", next);
   assert.deepEqual((await f.game()).used, ["اب", "بدا"]);
   await f.msg("إب", first);
@@ -298,8 +299,6 @@ test("private commands avoid score storage and group points remain available", a
   assert.match(f.last().text, /أهلًا بك/);
   await privateMessage("/help");
   assert.match(f.last().text, /120 ثانية[\s\S]*15 ثانية[\s\S]*3 فرص[\s\S]*10 نقاط/);
-  await privateMessage("/myid@EndToStartBot");
-  assert.equal(f.last().text, "معرّفك في تيليغرام: 10");
   await privateMessage("/mypoints");
   assert.equal(f.last().text, "📊 نقاطك محفوظة حسب المجموعة. افتح المجموعة واكتب /mypoints لمعرفة رصيدك.");
   assert.equal(f.last().chat_id, host.id);
@@ -347,13 +346,18 @@ test("registration script replaces the scoped command lists on repeated runs", a
     if (token === undefined) delete process.env.BOT_TOKEN;
     else process.env.BOT_TOKEN = token;
   }
-  assert.deepEqual(requests.slice(0, 3), requests.slice(3));
+  assert.deepEqual(requests.slice(0, 4), requests.slice(4));
   assert.equal(requests[0][0], "getMe");
+  const group = [
+    "start", "game", "mypoints", "leaderboard", "help", "startgame", "cancelgame",
+    "players", "status", "points", "playerpointendtostartgame", "top", "rules",
+  ];
   const expected = {
-    all_group_chats: ["game", "startgame", "mypoints", "leaderboard", "playerpointendtostartgame", "rules", "cancelgame", "help"],
-    all_private_chats: ["start", "help", "myid"],
+    all_group_chats: group,
+    all_chat_administrators: group,
+    all_private_chats: ["start", "mypoints", "help", "points", "rules"],
   };
-  for (const [method, registration] of requests.slice(1, 3)) {
+  for (const [method, registration] of requests.slice(1, 4)) {
     assert.equal(method, "setMyCommands");
     assert.deepEqual(registration.commands.map(entry => entry.command), expected[registration.scope.type]);
     assert.ok(registration.commands.every(entry => /\p{Script=Arabic}/u.test(entry.description)));
@@ -406,115 +410,53 @@ test("registration rejects a wrong bot and keeps token-bearing errors private", 
   assert.ok(error.mock.calls.every(call => !call.arguments[0].includes(env.BOT_TOKEN)));
 });
 
-const owner = { id: 101, first_name: "مالك" };
-const otherOwner = { id: 102, first_name: "مالك آخر" };
-const membership = (from, oldStatus = "left", status = "member") => ({
-  chat, from, old_chat_member: { status: oldStatus }, new_chat_member: { status }, date: 1_800_000_000,
-});
-
-test("the webhook handles group additions and persists numeric owner approval", async t => {
-  const f = fixture(t, { APPROVED_GROUP_IDS: "" });
-  await f.msg("/game");
-  assert.equal(await f.game(), undefined);
-
-  const impostor = { ...host, username: "mefxyou" };
-  const unauthorized = { update_id: 100, my_chat_member: membership(impostor) };
-  assert.equal((await f.webhook(unauthorized)).status, 200);
-  assert.equal(f.last("leaveChat").chat_id, chat.id);
-  await f.webhook(unauthorized);
-  assert.equal(f.calls.filter(call => call.method === "leaveChat").length, 1);
-  await f.webhook({ update_id: 101, my_chat_member: membership(owner) });
-  f.restart();
-  await f.msg("/start@EndToStartBot", host);
-  const join = f.last().reply_markup.inline_keyboard[0][0].callback_data;
-  await f.callback(join);
-  assert.equal((await f.game()).players.length, 2);
-  const scores = await f.storage.get("scores");
-  await f.webhook({ update_id: 102, my_chat_member: membership(owner, "member", "left") });
-  await f.webhook({ update_id: 103, my_chat_member: membership(impostor) });
-  await f.msg("/mypoints");
-  assert.equal(f.calls.filter(call => call.method === "leaveChat").length, 1);
-  assert.equal(await f.storage.get("groupApproved"), true);
-  assert.deepEqual(await f.storage.get("scores"), scores);
-});
-
-test("preapproved groups are protected even if a non-owner adds the bot", async t => {
+test("a new group can open and join a round without approval", async t => {
   const f = fixture(t);
-  await f.webhook({ update_id: 100, my_chat_member: membership(host) });
-  assert.equal(f.last("leaveChat"), undefined);
-  await f.open();
-  assert.equal((await f.game()).phase, "lobby");
-});
-
-test("invalid configuration blocks group operations without making the bot leave", async t => {
-  const f = fixture(t, { ADMIN_USER_IDS: "101,101,103" });
-  await f.webhook({ update_id: 100, my_chat_member: membership(host) });
-  await f.msg("/approvegroup", owner);
-  await f.msg("/game");
+  const newChat = { id: -654, type: "group" };
+  const membership = {
+    chat: newChat, from: host, old_chat_member: { status: "left" },
+    new_chat_member: { status: "member" },
+  };
+  assert.equal((await f.webhook({ my_chat_member: membership })).status, 200);
   assert.equal(f.calls.length, 0);
-  assert.equal(await f.game(), undefined);
-  assert.equal(await f.storage.get("groupApproved"), undefined);
+
+  for (const [update_id, text, expected] of [
+    [100, "/help", /120 ثانية/],
+    [101, "/leaderboard", /لا يوجد رصيد/],
+    [102, "/game", /فُتح التسجيل/],
+  ]) {
+    const response = await f.webhook({ update_id, message: { chat: newChat, from: host, text } });
+    assert.equal(response.status, 200);
+    assert.equal(f.last().chat_id, newChat.id);
+    assert.match(f.last().text, expected);
+  }
+  const lobby = await f.game();
+  const join = f.last().reply_markup.inline_keyboard[0][0].callback_data;
+  await f.webhook({ update_id: 103, callback_query: {
+    id: "join", from: second, data: join, message: { chat: newChat, message_id: lobby.lobbyMessageId },
+  } });
+  assert.deepEqual((await f.game()).players.map(({ id }) => id), [host.id, second.id]);
+  await f.expire();
+  assert.equal((await f.game()).phase, "playing");
+  assert.equal(f.storage.alarmAt, f.now() + 15_000);
 });
 
-test("score changes require a numeric owner, preserve wins and audit successful updates", async t => {
-  const f = fixture(t);
-  const original = { user_id: host.id, name: "اسم قديم", points: 10, wins: 4 };
-  const untouched = { user_id: second.id, name: "صنارة", points: 20, wins: 2 };
-  await f.storage.put("scores", { [host.id]: original, [second.id]: untouched });
-  const change = (text, from, id, extra = {}) => f.dispatch({
-    message: { chat, from, text, reply_to_message: { from: host }, ...extra },
-  }, id);
-  await change("/addpoints 7", { ...admin, username: "mefxyou" }, 100);
-  assert.equal((await f.storage.get("scores"))[host.id].points, 10);
-  await change("/addpoints 7", owner, 101, { sender_chat: chat });
-  assert.equal((await f.storage.get("scores"))[host.id].points, 10);
-  await f.msg("/addpoints 7", owner);
-  assert.match(f.last().text, /ردّ على رسالة اللاعب/);
-  await change("/addpoints@EndToStartBot 7", owner, 102);
-  f.restart();
-  await change("/addpoints@EndToStartBot 7", owner, 102);
-  assert.deepEqual(await f.storage.get("scoreAudit:102"), {
-    action: "addpoints", admin_id: owner.id, target_user_id: host.id, group_id: chat.id,
-    previous_points: 10, new_points: 17, timestamp: new Date(f.now()).toISOString(), update_id: 102,
-  });
-  await change("/removepoints 50", owner, 103);
-  assert.equal((await f.storage.get("scores"))[host.id].points, 0);
-  await change("/setpoints -1", owner, 104);
-  assert.equal(await f.storage.get("scoreAudit:104"), undefined);
-  await change("/setpoints 6", owner, 105);
-  assert.deepEqual(await f.storage.get("scores"), {
-    [host.id]: { ...original, name: host.first_name, points: 6 },
-    [second.id]: untouched,
-  });
-});
+test("retired score commands and old reset buttons leave stored scores intact", async t => {
+  const f = fixture(t, { ADMIN_USER_IDS: "101,102,103", APPROVED_GROUP_IDS: String(chat.id) });
+  const formerOwner = { id: 101, first_name: "مالك" };
+  const scores = { 10: { user_id: host.id, name: host.first_name, points: 100, wins: 3 } };
+  const pendingReset = { token: "old-confirmation", targetId: host.id, expiresAt: f.now() + 60_000 };
+  await f.storage.put("scores", scores);
+  await f.storage.put("scoreReset:101", pendingReset);
 
-test("score reset confirmation is owner-bound, expires and applies exactly once", async t => {
-  const f = fixture(t);
-  await f.storage.put("scores", { [host.id]: { user_id: host.id, name: host.first_name, points: 30, wins: 3 } });
-  const request = id => f.dispatch({ message: {
-    chat, from: owner, text: "/resetpoints", reply_to_message: { from: host },
-  } }, id);
-  assert.equal((await request(100)).status, 200);
-  assert.equal(await f.storage.get("scoreResetRequest:100"), true);
-  const first = f.last().reply_markup.inline_keyboard[0][0].callback_data;
-  await request(100);
-  assert.equal(f.calls.filter(call => call.method === "sendMessage").length, 1);
-  await f.callback(first, admin);
-  assert.match(f.last("answerCallbackQuery").text, /لمالكي البوت فقط/);
-  await f.callback(first, otherOwner);
-  assert.match(f.last("answerCallbackQuery").text, /غير صالح/);
-  f.at(f.now() + 300_000);
-  await f.callback(first, owner);
-  assert.match(f.last("answerCallbackQuery").text, /انتهت صلاحيته/);
-  assert.equal((await f.storage.get("scores"))[host.id].points, 30);
-  await request(101);
-  const secondToken = f.last().reply_markup.inline_keyboard[0][0].callback_data;
-  f.restart();
-  await Promise.all([f.callback(secondToken, owner), f.callback(secondToken, owner)]);
-  assert.deepEqual((await f.storage.get("scores"))[host.id], {
-    user_id: host.id, name: host.first_name, points: 0, wins: 3,
-  });
-  const audits = [...f.storage.data.values()].filter(entry => entry.action === "resetpoints");
-  assert.equal(audits.length, 1);
-  assert.equal(audits[0].previous_points, 30);
+  for (const from of [second, formerOwner]) {
+    for (const text of ["/addpoints 7", "/removepoints 7", "/setpoints 7", "/resetpoints"]) {
+      await f.dispatch({ message: { chat, from, text, reply_to_message: { from: host } } });
+      assert.match(f.last().text, /تعديل النقاط معطّل/);
+    }
+  }
+  await f.callback("resetpoints:old-confirmation", formerOwner);
+  assert.match(f.last("answerCallbackQuery").text, /تعديل النقاط معطّل/);
+  assert.deepEqual(await f.storage.get("scores"), scores);
+  assert.deepEqual(await f.storage.get("scoreReset:101"), pendingReset);
 });

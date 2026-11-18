@@ -1,5 +1,5 @@
-import { help, parseCommand, rules, welcome } from "./commands.js";
-import { telegram } from "./telegram.js";
+import { help, parseCommand, welcome } from "./commands.js";
+import { telegram, telegramErrorDetails } from "./telegram.js";
 
 const REGISTRATION_MS = 120_000;
 const TURN_MS = 15_000;
@@ -70,7 +70,8 @@ function scoreboard(game, hearts = activeHearts) {
 }
 
 function lobbyMessage(game) {
-  return `فُتح التسجيل للعبة آخر حرف لمدة 120 ثانية.\nصاحب الجولة: ${game.players[0].name}\nعدد المسجلين: ${game.players.length}\nيبدأ اللعب بلاعبين على الأقل. يمكن لصاحب الجولة أو مشرف المجموعة البدء مبكرًا.`;
+  const names = game.players.map((player, index) => `${index + 1}. ${player.name}`).join("\n");
+  return `فُتح التسجيل للعبة آخر حرف لمدة 120 ثانية.\n\nعدد المسجلين: ${game.players.length}\n\n${names}\n\nيمكن لصاحب الجولة أو مشرف المجموعة البدء بعد تسجيل لاعبين على الأقل.`;
 }
 
 function lobbyKeyboard(game) {
@@ -128,20 +129,20 @@ export default {
       const chat = msg?.chat || callback?.message?.chat;
       if (chat?.type === "private" && msg?.text && !msg.from?.is_bot) {
         const command = parseCommand(msg.text.trim());
-        if (command?.addressedHere) {
-          const message = new Map([["start", welcome], ["help", help], ["rules", rules]]).get(command.name);
-          if (message) await telegram(env.BOT_TOKEN, "sendMessage", { chat_id: chat.id, text: message });
-        }
+        if (!command?.addressedHere) return new Response("OK");
+        const message = new Map([["start", welcome], ["help", help], ["rules", help]]).get(command.name);
+        if (message) await telegram(env.BOT_TOKEN, "sendMessage", { chat_id: chat.id, text: message });
+        if (!["points", "mypoints"].includes(command.name)) return new Response("OK");
+      } else if (!chat || !["group", "supergroup"].includes(chat.type)) {
         return new Response("OK");
       }
-      if (!chat || !["group", "supergroup"].includes(chat.type)) return new Response("OK");
       const id = env.GAMES.idFromName(String(chat.id));
       const object = env.GAMES.get(id);
-      return await object.fetch("https://game.internal/update", {
+      return await object.fetch(new Request("https://game.internal/update", {
         method: "POST", body: JSON.stringify(update),
-      });
-    } catch {
-      console.error("Webhook processing failed");
+      }));
+    } catch (error) {
+      console.error("Webhook processing failed", telegramErrorDetails(error));
       return new Response("Temporary error", { status: 500 });
     }
   },
@@ -168,8 +169,8 @@ export class WordGame {
   async tryTelegram(method, payload) {
     try {
       return await this.callTelegram(method, payload);
-    } catch {
-      console.error(`Telegram ${method} failed`);
+    } catch (error) {
+      console.error(`Telegram ${method} failed`, telegramErrorDetails(error));
     }
   }
 
@@ -282,7 +283,7 @@ export class WordGame {
         };
       }
       const reward = winnerPlayer ? `\n\n+${WIN_POINTS} نقاط للفائز!` : "";
-      texts.push(`انتهت الجولة!\n\nالفائز: ${winner}${reward}\n\nالنتائج:\n\n${scoreboard(game, finalHearts)}\n\nاكتب /game لفتح جولة جديدة.`);
+      texts.push(`انتهت الجولة!\n\nالفائز: ${winner}${reward}\n\nالنتائج:\n\n${scoreboard(game, finalHearts)}\n\nاكتب /start لفتح جولة جديدة.`);
       game.phase = "idle";
       game.hostId = null;
       game.deadline = null;
@@ -331,8 +332,8 @@ export class WordGame {
       if (game.phase === "lobby") closedMessage = this.expireLobby(game, texts, now);
       else this.expireTurn(game, texts, now);
       await this.save(game);
-      await this.notify(game.chatId, texts);
       await this.closeLobby(game.chatId, closedMessage);
+      await this.notify(game.chatId, texts);
     });
   }
 
@@ -350,7 +351,18 @@ export class WordGame {
       }, { headers: { "Cache-Control": "no-store" } });
     }
     const update = await request.json();
-    return this.runExclusive(() => this.handleUpdate(update));
+    try {
+      return await this.runExclusive(() => this.handleUpdate(update));
+    } catch (error) {
+      console.error("Game update failed", telegramErrorDetails(error));
+      return new Response("Temporary error", { status: 500 });
+    }
+  }
+
+  async pointsMessage(from) {
+    const scores = (await this.ctx.storage.get("scores")) || {};
+    const entry = scores[String(from.id)];
+    return `رصيد ${display(from)}: ${entry?.points || 0} نقطة\nمرات الفوز: ${entry?.wins || 0}`;
   }
 
   async handleUpdate(update) {
@@ -364,6 +376,12 @@ export class WordGame {
     const parsed = parseCommand(raw);
     if (parsed && !parsed.addressedHere) return new Response("OK");
     const command = parsed?.name;
+    if (chat.type === "private") {
+      if (["points", "mypoints"].includes(command)) {
+        await this.callTelegram("sendMessage", { chat_id: chat.id, text: await this.pointsMessage(from) });
+      }
+      return new Response("OK");
+    }
     let game = await this.loadGame();
     game.chatId = chat.id;
     if (game.recentUpdates.includes(update.update_id)) {
@@ -416,7 +434,7 @@ export class WordGame {
 
     if (earlyStart) {
       let error;
-      if (game.phase !== "lobby") error = "التسجيل مغلق. اكتب /game لفتح جولة جديدة.";
+      if (game.phase !== "lobby") error = "التسجيل مغلق. اكتب /start لفتح جولة جديدة.";
       else if (!authorized) error = "يمكن لصاحب الجولة أو مشرف المجموعة فقط بدء الجولة.";
       else if (game.players.length < 2) error = "نحتاج لاعبين اثنين على الأقل.";
       else {
@@ -439,14 +457,10 @@ export class WordGame {
           editedLobby = true;
         }
       }
-    } else if (command === "start") {
-      texts.push(welcome);
-    } else if (command === "help") {
+    } else if (command === "help" || command === "rules") {
       texts.push(help);
-    } else if (command === "rules") {
-      texts.push(rules);
-    } else if (command === "game") {
-      if (game.phase !== "idle") texts.push("هناك تسجيل أو جولة جارية. استخدم /status.");
+    } else if (command === "start" || command === "game") {
+      if (game.phase !== "idle") texts.push("هناك تسجيل مفتوح أو جولة جارية بالفعل.");
       else {
         game = {
           ...newGame(),
@@ -456,39 +470,36 @@ export class WordGame {
           roundId: crypto.randomUUID(),
           hostId: from.id,
           players: [{ id: from.id, name: display(from), lives: MAX_LIVES }],
-          deadline: now + REGISTRATION_MS,
         };
         createdLobby = true;
       }
     } else if (command === "players") {
       texts.push(game.players.length
         ? `المشاركون (${game.players.length}):\n${scoreboard(game, game.phase === "idle" ? finalHearts : activeHearts)}`
-        : "لا يوجد لاعبون مسجلون. اكتب /game.");
+        : "لا يوجد لاعبون مسجلون. اكتب /start.");
     } else if (command === "points" || command === "mypoints") {
-      const scores = (await this.ctx.storage.get("scores")) || {};
-      const entry = scores[String(from.id)];
-      texts.push(`رصيد ${display(from)}: ${entry?.points || 0} نقطة\nمرات الفوز: ${entry?.wins || 0}`);
-    } else if (command === "leaderboard" || command === "top") {
+      texts.push(await this.pointsMessage(from));
+    } else if (["playerpointendtostartgame", "leaderboard", "top"].includes(command)) {
       const scores = (await this.ctx.storage.get("scores")) || {};
       const ranking = Object.values(scores).sort((a, b) => b.points - a.points || b.wins - a.wins)
         .slice(0, 20);
       texts.push(ranking.length
         ? `ترتيب النقاط الإجمالي:\n${ranking.map((p, i) => `${i + 1}. ${cleanStoredName(p.name)}: ${p.points} نقطة (${p.wins} فوز)`).join("\n")}`
-        : "لا يوجد رصيد نقاط بعد. اكتب /game وابدأ الجولة!");
+        : "لا يوجد رصيد نقاط بعد. اكتب /start وابدأ الجولة!");
     } else if (command === "status") {
       const left = Math.max(0, Math.ceil((game.deadline - now) / 1000));
       if (game.phase === "playing") {
         texts.push(`الجولة مستمرة.\nالدور: ${game.players[game.turnIndex].name}\nالحرف: ${game.requiredLetter || "حر"}\nالمتبقي: ${left} ثانية\n\n${scoreboard(game)}`);
       } else if (game.phase === "lobby") {
         texts.push(`التسجيل مفتوح. عدد المسجلين: ${game.players.length}. الوقت المتبقي: ${left} ثانية.`);
-      } else texts.push("لا توجد جولة حاليًا. اكتب /game.");
+      } else texts.push("لا توجد جولة حاليًا. اكتب /start.");
     } else if (cancel) {
       if (game.phase === "idle") texts.push("لا توجد جولة لإلغائها.");
       else if (!authorized) texts.push("يمكن لصاحب الجولة أو مشرف المجموعة فقط الإلغاء.");
       else {
         if (game.phase === "lobby") closedMessage = game.lobbyMessageId;
         game = { ...newGame(), recentUpdates: game.recentUpdates, chatId: chat.id };
-        texts.push("تم إلغاء الجولة. اكتب /game لفتح جولة جديدة.");
+        texts.push("تم إلغاء الجولة. اكتب /start لفتح جولة جديدة.");
       }
     } else if (!raw.startsWith("/") && msg?.text && !expired && game.phase === "playing") {
       const currentPlayer = game.players[game.turnIndex];
@@ -508,6 +519,14 @@ export class WordGame {
       }
     }
 
+    if (createdLobby) {
+      // Publish the keyboard before committing a lobby that players need it to join.
+      const message = await this.callTelegram("sendMessage", {
+        chat_id: chat.id, text: lobbyMessage(game), reply_markup: lobbyKeyboard(game),
+      });
+      game.lobbyMessageId = message.message_id;
+      game.deadline = Date.now() + REGISTRATION_MS;
+    }
     await this.save(game);
 
     if (callback) {
@@ -515,17 +534,9 @@ export class WordGame {
         callback_query_id: callback.id, text: callbackText, show_alert: false,
       });
     }
-    await this.notify(chat.id, texts);
     await this.closeLobby(chat.id, closedMessage);
-    if (createdLobby) {
-      const message = await this.tryTelegram("sendMessage", {
-        chat_id: chat.id, text: lobbyMessage(game), reply_markup: lobbyKeyboard(game),
-      });
-      if (message?.message_id != null) {
-        game.lobbyMessageId = message.message_id;
-        await this.save(game);
-      }
-    } else if (editedLobby && game.lobbyMessageId != null) {
+    await this.notify(chat.id, texts);
+    if (editedLobby && game.lobbyMessageId != null) {
       await this.tryTelegram("editMessageText", {
         chat_id: chat.id, message_id: game.lobbyMessageId,
         text: lobbyMessage(game), reply_markup: lobbyKeyboard(game),

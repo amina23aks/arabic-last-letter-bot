@@ -1,4 +1,4 @@
-import { commands } from "../src/commands.js";
+import { groupCommands, privateCommands } from "../src/commands.js";
 import { telegram } from "../src/telegram.js";
 
 const token = process.env.BOT_TOKEN;
@@ -11,12 +11,14 @@ if (!token || !/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
     if (bot?.username?.toLowerCase() !== "endtostartbot") {
       throw new Error("Unexpected bot");
     }
-    const registered = await telegram(token, "setMyCommands", {
-      scope: { type: "all_group_chats" },
-      commands,
-    });
-    if (registered !== true) throw new Error("Registration was rejected");
-    console.log("Registered nine Arabic commands for EndToStartBot group chats.");
+    for (const [type, commands] of [
+      ["all_group_chats", groupCommands],
+      ["all_private_chats", privateCommands],
+    ]) {
+      const registered = await telegram(token, "setMyCommands", { scope: { type }, commands });
+      if (registered !== true) throw new Error("Registration was rejected");
+    }
+    console.log("Registered Arabic commands for EndToStartBot group and private chats.");
   } catch {
     console.error("Registration failed. Check that the token belongs to EndToStartBot and that api.telegram.org is reachable.");
     process.exitCode = 1;

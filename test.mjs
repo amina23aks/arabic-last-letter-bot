@@ -347,9 +347,9 @@ test("private points read only the caller's current balances from indexed groups
   assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 40 نقطة\n\n🏆 مرات الفوز: 4");
   const otherStorage = f.bindings.get(String(other.id)).ctx.storage;
   await otherStorage.put("scores", { 10: { ...oldScores[10], points: 70, wins: 7 } });
-  // Two earned group balances are ambiguous until the player picks one in its group.
+  // Joining another group does not override the explicit group selection.
   await privateMessage("/mypoints");
-  assert.match(f.last().text, /عندك أكثر من رصيد مختلف/);
+  assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 40 نقطة\n\n🏆 مرات الفوز: 4");
   await groupMessage(other, "/mypoints");
   await privateMessage("/mypoints");
   assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 70 نقطة\n\n🏆 مرات الفوز: 7");

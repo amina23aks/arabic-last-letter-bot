@@ -12,17 +12,17 @@ export async function readJson(object, path) {
   return response.json();
 }
 
-async function rememberGroup(env, objectName, chat, rememberActivity = false) {
+async function rememberGroup(env, objectName, chat, rememberActivity = false, select = false) {
   const response = await objectFor(env, objectName).fetch(new Request("https://game.internal/score-groups", {
     method: "PUT",
-    body: JSON.stringify({ id: chat.id, title: chat.title, rememberActivity }),
+    body: JSON.stringify({ id: chat.id, title: chat.title, rememberActivity, select }),
   }));
   if (!response.ok) throw new Error("Score group registration failed");
 }
 
 // A player's most recent /mypoints request in a group selects the balance shown privately.
-export function rememberScoreGroup(env, userId, chat) {
-  return rememberGroup(env, `player:${userId}`, chat, true);
+export function rememberScoreGroup(env, userId, chat, select) {
+  return rememberGroup(env, `player:${userId}`, chat, true, select);
 }
 
 export function rememberLeaderboardGroup(env, chat) {
@@ -37,7 +37,7 @@ function playerName(user) {
 
 export async function privatePointsMessage(env, user) {
   const userId = user.id;
-  const groups = await readJson(objectFor(env, `player:${userId}`), "/score-groups");
+  const { groups, selectedId } = await readJson(objectFor(env, `player:${userId}`), "/score-groups?include_selection=1");
   if (!groups.length) return NO_HISTORY;
 
   const checked = await Promise.allSettled(groups.map(async group => {
@@ -52,10 +52,12 @@ export async function privatePointsMessage(env, user) {
   const nonzero = found.filter(row => row.score.points !== 0 || row.score.wins !== 0);
   const recent = found.filter(row => Number.isFinite(row.group.lastSeenAt) && row.group.lastSeenAt > 0)
     .sort((a, b) => b.group.lastSeenAt - a.group.lastSeenAt);
+  const selected = found.find(row => row.group.id === selectedId);
   let chosen;
   // Prefer the only earned balance over a stray zero from an older or test group.
   if (found.length === 1) chosen = found[0];
   else if (nonzero.length === 1) chosen = nonzero[0];
+  else if (selected) chosen = selected;
   else if (recent.length && (recent.length === 1 || recent[0].group.lastSeenAt > recent[1].group.lastSeenAt)) {
     chosen = recent[0];
   } else {

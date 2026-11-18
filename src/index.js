@@ -393,18 +393,24 @@ export class WordGame {
       if (path === "/score-groups") {
         if (request.method === "GET") {
           const groups = await this.ctx.storage.list({ prefix: "scoreGroup:" });
-          return Response.json([...groups.values()]);
+          const items = [...groups.values()];
+          if (!searchParams.has("include_selection")) return Response.json(items);
+          const selectedId = await this.ctx.storage.get("selectedScoreGroup");
+          return Response.json({ groups: items, selectedId });
         }
         if (request.method === "PUT") {
-          const { id, title, rememberActivity } = await request.json();
+          const { id, title, rememberActivity, select } = await request.json();
           if (!Number.isSafeInteger(id) || id >= 0) return new Response(null, { status: 400 });
           const key = `scoreGroup:${id}`;
           const prior = await this.ctx.storage.get(key);
           const name = typeof title === "string" ? title.trim().replace(/\s+/g, " ").slice(0, 100) : "";
           if (rememberActivity || name || !prior) {
-            await this.ctx.storage.put(key, {
-              id, title: name || prior?.title || "",
-              ...(rememberActivity ? { lastSeenAt: Date.now() } : prior?.lastSeenAt ? { lastSeenAt: prior.lastSeenAt } : {}),
+            await this.ctx.storage.transaction(async txn => {
+              await txn.put(key, {
+                id, title: name || prior?.title || "",
+                ...(rememberActivity ? { lastSeenAt: Date.now() } : prior?.lastSeenAt ? { lastSeenAt: prior.lastSeenAt } : {}),
+              });
+              if (select) await txn.put("selectedScoreGroup", id);
             });
           }
           return new Response(null, { status: 204 });
@@ -424,9 +430,9 @@ export class WordGame {
     }
   }
 
-  async updateScoreIndex(chat, userId) {
+  async updateScoreIndex(chat, userId, select = false) {
     const writes = [rememberLeaderboardGroup(this.env, chat)];
-    if (userId) writes.push(rememberScoreGroup(this.env, userId, chat));
+    if (userId) writes.push(rememberScoreGroup(this.env, userId, chat, select));
     const results = await Promise.allSettled(writes);
     if (results.some(result => result.status === "rejected")) {
       console.error("Could not update score index");
@@ -438,7 +444,7 @@ export class WordGame {
   async pointsMessage(from, chat) {
     const scores = (await this.ctx.storage.get("scores")) || {};
     const entry = scores[String(from.id)];
-    const indexed = await this.updateScoreIndex(chat, entry && from.id);
+    const indexed = await this.updateScoreIndex(chat, entry && from.id, true);
     const retry = indexed ? "" : "\nتعذّر تحديث الربط مع الخاص. أعد طلب /mypoints في المجموعة لاحقًا.";
 
     return `رصيد ${escapeHtml(display(from))}: ${entry?.points || 0} نقطة\nمرات الفوز: ${entry?.wins || 0}${retry}`;

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import worker, { activeHearts, finalHearts, WordGame } from "./src/index.js";
+import worker, { lifeIcons, WordGame } from "./src/index.js";
 
 const chat = { id: -987, type: "supergroup" };
 const host = { id: 10, first_name: "آمنة", username: "host_account" };
 const second = { id: 20, first_name: "صنارة", last_name: "صيد <>&", username: "second_account" };
 const admin = { id: 30, first_name: "محمد" };
-const env = { BOT_TOKEN: "123:test-token", WEBHOOK_SECRET: "test-webhook" };
+const env = { BOT_TOKEN: "123:test-token", WEBHOOK_SECRET: "test-webhook", ADMIN_USER_IDS: "101,102,103", APPROVED_GROUP_IDS: String(chat.id) };
 
 class Storage {
   data = new Map();
@@ -16,6 +16,8 @@ class Storage {
 
   async put(key, value) { this.data.set(key, structuredClone(value)); }
 
+  async delete(key) { this.data.delete(key); }
+
   async setAlarm(time) { this.alarmAt = time; }
 
   async deleteAlarm() { this.alarmAt = null; }
@@ -24,20 +26,22 @@ class Storage {
     const transaction = new Storage();
     transaction.data = structuredClone(this.data);
     transaction.alarmAt = this.alarmAt;
-    await action(transaction);
+    const result = await action(transaction);
     this.data = transaction.data;
     this.alarmAt = transaction.alarmAt;
+    return result;
   }
 }
 
-function fixture(t) {
+function fixture(t, overrides = {}) {
+  const config = { ...env, ...overrides };
   const storage = new Storage();
   const calls = [];
   let telegramFailure;
   let now = 1_800_000_000_000;
   let updateId = 0;
   let messageId = 0;
-  let object = new WordGame({ storage }, env);
+  let object = new WordGame({ storage }, config);
   t.mock.method(Date, "now", () => now);
   t.mock.method(globalThis, "fetch", async (url, options) => {
     const method = new URL(url).pathname.split("/").at(-1);
@@ -82,11 +86,11 @@ function fixture(t) {
       method: "POST",
       headers: { "X-Telegram-Bot-Api-Secret-Token": env.WEBHOOK_SECRET },
       body: JSON.stringify(update),
-    }), { ...env, GAMES: bindings });
+    }), { ...config, GAMES: bindings });
   }
 
-  const restart = () => { object = new WordGame({ storage }, env); };
-  return { storage, calls, game, webhook, failTelegram: handler => { telegramFailure = handler; }, msg, callback, open, at, alarm, expire, last, restart, now: () => now };
+  const restart = () => { object = new WordGame({ storage }, config); };
+  return { dispatch, storage, calls, game, webhook, failTelegram: handler => { telegramFailure = handler; }, msg, callback, open, at, alarm, expire, last, restart, now: () => now };
 }
 
 test("registration deadline, buttons, edits, duplicate joins and cancellation", async t => {
@@ -132,8 +136,8 @@ test("owner can start with a suffixed command and admin can start with a button"
   await f.msg("/startgame@EndToStartBot");
   assert.equal((await f.game()).phase, "playing");
   assert.equal(f.storage.alarmAt, f.now() + 15_000);
-  assert.ok(f.calls.some(call => call.text?.includes("صنارة صيد <>& — 💚💚💚")));
-  assert.ok(!f.calls.some(call => call.text?.includes("second_account") || call.parse_mode));
+  assert.ok(f.calls.some(call => call.text?.includes("صنارة صيد &lt;&gt;&amp; — 💚💚💚")));
+  assert.ok(!f.calls.some(call => call.text?.includes("second_account")));
   await f.msg("/cancelgame");
   assert.equal((await f.game()).phase, "idle");
   const [newJoin, newStart] = await f.open();
@@ -164,9 +168,8 @@ test("registration auto-cancels with one player and auto-starts once at the dead
   assert.equal(f.calls.filter(call => call.method === "editMessageReplyMarkup").length, 2);
 });
 
-test("heart formats render exactly three hearts for every chance count", () => {
-  assert.deepEqual([0, 1, 2, 3].map(activeHearts), ["❤️❤️❤️", "💚❤️❤️", "💚💚❤️", "💚💚💚"]);
-  assert.deepEqual([0, 1, 2, 3].map(finalHearts), ["🖤🖤🖤", "🤍🖤🖤", "🤍🤍🖤", "🤍🤍🤍"]);
+test("life icons render three positions for every chance count", () => {
+  assert.deepEqual([0, 1, 2, 3].map(lifeIcons), ["🕊️🕊️🕊️", "💚🕊️🕊️", "💚💚🕊️", "💚💚💚"]);
 });
 
 test("Arabic normalization, turn ownership, wrong letter and repeat handling", async t => {
@@ -181,7 +184,8 @@ test("Arabic normalization, turn ownership, wrong letter and repeat handling", a
   await f.msg("أَب", first);
   assert.deepEqual((await f.game()).used, ["اب"]);
   assert.equal(f.calls.length, before + 1);
-  assert.match(f.last().text, /اكتب كلمة تبدأ بحرف: ب/);
+  assert.match(f.last().text, /اكتب كلمة تبدأ بحرف: <b>ب<\/b>/);
+  assert.equal(f.last().parse_mode, "HTML");
   await f.msg("قلم", next);
   assert.match(f.last().text, /لازم تبدأ/);
   await f.msg("بَدَأ", next);
@@ -216,9 +220,9 @@ test("timeouts, replay, scoring, aliases, and legacy scores survive recreation",
   const [loser, winner] = game.players;
   assert.equal(loser.lives, 0);
   assert.equal(winner.lives, 1);
-  assert.match(f.last().text, /انتهت الجولة!\n\nالفائز: .*\n\n\+10 نقاط للفائز!/);
-  assert.match(f.last().text, /🖤🖤🖤[\s\S]*🤍🖤🖤/);
-  assert.doesNotMatch(f.last().text, /💚|❤️/);
+  assert.match(f.last().text, /🏁 انتهت الجولة!\n\n🏆 الفائز: .*\n\n🎁 \+10 نقاط للفائز/);
+  assert.match(f.last().text, /🕊️🕊️🕊️[\s\S]*💚🕊️🕊️/);
+  assert.doesNotMatch(f.last().text, /❤️|🤍|🖤/);
   const [award] = await f.storage.get("rewardEvents");
   assert.equal(award.user_id, winner.id);
   assert.equal(award.points, 10);
@@ -284,38 +288,28 @@ test("webhook routes group /start, registers the host, and updates the player li
   assert.deepEqual(routeNames, Array(4).fill(String(chat.id)));
 });
 
-test("private /start welcomes, help covers gameplay, and /mypoints reads existing scores", async t => {
+test("private commands avoid score storage and group points remain available", async t => {
   const f = fixture(t);
   const privateChat = { id: host.id, type: "private" };
-  const send = (chat, text) => f.webhook({ message: { chat, from: host, text } });
-  await send(privateChat, "/start");
+  const selected = [];
+  const bindings = { idFromName(id) { selected.push(id); return id; }, get: () => ({ fetch: f.dispatch }) };
+  const privateMessage = text => f.webhook({ message: { chat: privateChat, from: host, text } }, bindings);
+  await privateMessage("/start");
   assert.match(f.last().text, /أهلًا بك/);
-  assert.equal(f.last().chat_id, host.id);
-  assert.equal(await f.game(), undefined);
-  await send(privateChat, "/help");
+  await privateMessage("/help");
   assert.match(f.last().text, /120 ثانية[\s\S]*15 ثانية[\s\S]*3 فرص[\s\S]*10 نقاط/);
-  const privateStorage = new Storage();
-  const privateScores = { 10: { user_id: host.id, name: host.first_name, points: 20, wins: 2 } };
+  await privateMessage("/myid@EndToStartBot");
+  assert.equal(f.last().text, "معرّفك في تيليغرام: 10");
+  await privateMessage("/mypoints");
+  assert.equal(f.last().text, "📊 نقاطك محفوظة حسب المجموعة. افتح المجموعة واكتب /mypoints لمعرفة رصيدك.");
+  assert.equal(f.last().chat_id, host.id);
+  assert.deepEqual(selected, []);
   const groupScores = { 10: { user_id: host.id, name: host.first_name, points: 40, wins: 4 } };
-  await privateStorage.put("scores", privateScores);
   await f.storage.put("scores", groupScores);
-  for (const [context, scores] of [[privateChat, privateScores], [chat, groupScores]]) {
-    const selected = [];
-    const response = await f.webhook({ message: { chat: context, from: host, text: "/mypoints@EndToStartBot" } }, {
-      idFromName(name) { selected.push(name); return name; },
-      get(id) {
-        const storage = id === String(privateChat.id) ? privateStorage : f.storage;
-        return new WordGame({ storage }, env);
-      },
-    });
-    assert.equal(response.status, 200);
-    assert.deepEqual(selected, [String(context.id)]);
-    assert.equal(f.last().chat_id, context.id);
-    assert.ok(f.last().text.includes(`${scores[host.id].points} نقطة\nمرات الفوز: ${scores[host.id].wins}`));
-  }
+  await f.webhook({ message: { chat, from: host, text: "/mypoints@EndToStartBot" } });
+  assert.equal(f.last().chat_id, chat.id);
+  assert.match(f.last().text, /40 نقطة\nمرات الفوز: 4/);
   assert.deepEqual(await f.storage.get("scores"), groupScores);
-  assert.deepEqual(await privateStorage.get("scores"), privateScores);
-  assert.equal(await privateStorage.get("game"), undefined);
 });
 
 test("a failed lobby message is logged safely and the same webhook can retry", async t => {
@@ -356,8 +350,8 @@ test("registration script replaces the scoped command lists on repeated runs", a
   assert.deepEqual(requests.slice(0, 3), requests.slice(3));
   assert.equal(requests[0][0], "getMe");
   const expected = {
-    all_group_chats: ["start", "mypoints", "playerpointendtostartgame", "help"],
-    all_private_chats: ["start", "mypoints", "help"],
+    all_group_chats: ["game", "startgame", "mypoints", "leaderboard", "playerpointendtostartgame", "rules", "cancelgame", "help"],
+    all_private_chats: ["start", "help", "myid"],
   };
   for (const [method, registration] of requests.slice(1, 3)) {
     assert.equal(method, "setMyCommands");
@@ -410,4 +404,116 @@ test("registration rejects a wrong bot and keeps token-bearing errors private", 
   assert.deepEqual(methods, ["getMe", "getMe"]);
   assert.equal(error.mock.callCount(), 2);
   assert.ok(error.mock.calls.every(call => !call.arguments[0].includes(env.BOT_TOKEN)));
+});
+
+const owner = { id: 101, first_name: "مالك" };
+const otherOwner = { id: 102, first_name: "مالك آخر" };
+const membership = (from, oldStatus = "left", status = "member") => ({
+  chat, from, old_chat_member: { status: oldStatus }, new_chat_member: { status }, date: 1_800_000_000,
+});
+
+test("the webhook handles group additions and persists numeric owner approval", async t => {
+  const f = fixture(t, { APPROVED_GROUP_IDS: "" });
+  await f.msg("/game");
+  assert.equal(await f.game(), undefined);
+
+  const impostor = { ...host, username: "mefxyou" };
+  const unauthorized = { update_id: 100, my_chat_member: membership(impostor) };
+  assert.equal((await f.webhook(unauthorized)).status, 200);
+  assert.equal(f.last("leaveChat").chat_id, chat.id);
+  await f.webhook(unauthorized);
+  assert.equal(f.calls.filter(call => call.method === "leaveChat").length, 1);
+  await f.webhook({ update_id: 101, my_chat_member: membership(owner) });
+  f.restart();
+  const [join] = await f.open();
+  await f.callback(join);
+  assert.equal((await f.game()).players.length, 2);
+  await f.webhook({ update_id: 102, my_chat_member: membership(owner, "member", "left") });
+  await f.msg("/mypoints");
+  assert.equal(await f.storage.get("groupApproved"), false);
+  await f.msg("/approvegroup", impostor);
+  assert.equal(await f.storage.get("groupApproved"), false);
+  await f.msg("/approvegroup", owner, Math.floor(f.now() / 1000) + 1, 103);
+  assert.equal(await f.storage.get("groupApproved"), true);
+});
+
+test("preapproved groups are protected even if a non-owner adds the bot", async t => {
+  const f = fixture(t);
+  await f.webhook({ update_id: 100, my_chat_member: membership(host) });
+  assert.equal(f.last("leaveChat"), undefined);
+  await f.open();
+  assert.equal((await f.game()).phase, "lobby");
+});
+
+test("invalid configuration blocks group operations without making the bot leave", async t => {
+  const f = fixture(t, { ADMIN_USER_IDS: "101,101,103" });
+  await f.webhook({ update_id: 100, my_chat_member: membership(host) });
+  await f.msg("/approvegroup", owner);
+  await f.msg("/game");
+  assert.equal(f.calls.length, 0);
+  assert.equal(await f.game(), undefined);
+  assert.equal(await f.storage.get("groupApproved"), undefined);
+});
+
+test("score changes require a numeric owner, preserve wins and audit successful updates", async t => {
+  const f = fixture(t);
+  const original = { user_id: host.id, name: "اسم قديم", points: 10, wins: 4 };
+  const untouched = { user_id: second.id, name: "صنارة", points: 20, wins: 2 };
+  await f.storage.put("scores", { [host.id]: original, [second.id]: untouched });
+  const change = (text, from, id, extra = {}) => f.dispatch({
+    message: { chat, from, text, reply_to_message: { from: host }, ...extra },
+  }, id);
+  await change("/addpoints 7", { ...admin, username: "mefxyou" }, 100);
+  assert.equal((await f.storage.get("scores"))[host.id].points, 10);
+  await change("/addpoints 7", owner, 101, { sender_chat: chat });
+  assert.equal((await f.storage.get("scores"))[host.id].points, 10);
+  await f.msg("/addpoints 7", owner);
+  assert.match(f.last().text, /ردّ على رسالة اللاعب/);
+  await change("/addpoints@EndToStartBot 7", owner, 102);
+  f.restart();
+  await change("/addpoints@EndToStartBot 7", owner, 102);
+  assert.deepEqual(await f.storage.get("scoreAudit:102"), {
+    action: "addpoints", admin_id: owner.id, target_user_id: host.id, group_id: chat.id,
+    previous_points: 10, new_points: 17, timestamp: new Date(f.now()).toISOString(), update_id: 102,
+  });
+  await change("/removepoints 50", owner, 103);
+  assert.equal((await f.storage.get("scores"))[host.id].points, 0);
+  await change("/setpoints -1", owner, 104);
+  assert.equal(await f.storage.get("scoreAudit:104"), undefined);
+  await change("/setpoints 6", owner, 105);
+  assert.deepEqual(await f.storage.get("scores"), {
+    [host.id]: { ...original, name: host.first_name, points: 6 },
+    [second.id]: untouched,
+  });
+});
+
+test("score reset confirmation is owner-bound, expires and applies exactly once", async t => {
+  const f = fixture(t);
+  await f.storage.put("scores", { [host.id]: { user_id: host.id, name: host.first_name, points: 30, wins: 3 } });
+  const request = id => f.dispatch({ message: {
+    chat, from: owner, text: "/resetpoints", reply_to_message: { from: host },
+  } }, id);
+  assert.equal((await request(100)).status, 200);
+  assert.equal(await f.storage.get("scoreResetRequest:100"), true);
+  const first = f.last().reply_markup.inline_keyboard[0][0].callback_data;
+  await request(100);
+  assert.equal(f.calls.filter(call => call.method === "sendMessage").length, 1);
+  await f.callback(first, admin);
+  assert.match(f.last("answerCallbackQuery").text, /لمالكي البوت فقط/);
+  await f.callback(first, otherOwner);
+  assert.match(f.last("answerCallbackQuery").text, /غير صالح/);
+  f.at(f.now() + 300_000);
+  await f.callback(first, owner);
+  assert.match(f.last("answerCallbackQuery").text, /انتهت صلاحيته/);
+  assert.equal((await f.storage.get("scores"))[host.id].points, 30);
+  await request(101);
+  const secondToken = f.last().reply_markup.inline_keyboard[0][0].callback_data;
+  f.restart();
+  await Promise.all([f.callback(secondToken, owner), f.callback(secondToken, owner)]);
+  assert.deepEqual((await f.storage.get("scores"))[host.id], {
+    user_id: host.id, name: host.first_name, points: 0, wins: 3,
+  });
+  const audits = [...f.storage.data.values()].filter(entry => entry.action === "resetpoints");
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].previous_points, 30);
 });

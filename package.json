@@ -7,7 +7,8 @@
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "check": "node --check src/index.js",
-    "test": "node test.mjs"
+    "test": "node test.mjs",
+    "register-commands": "node scripts/register-commands.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

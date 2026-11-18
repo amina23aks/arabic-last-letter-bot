@@ -392,13 +392,13 @@ export class WordGame {
     const wasMember = isGroupMember(old_chat_member);
     const isMember = isGroupMember(new_chat_member);
     if (wasMember === isMember) return;
-    const ownerAdded = !wasMember && isMember && access.owners.has(from?.id);
+    const ownerAdded = !wasMember && isMember && !from?.is_bot && access.owners.has(from?.id);
     if (!wasMember && isMember && !ownerAdded && !await this.isApproved(chat.id, access)) {
       // Let Telegram retry the update if the leave request fails.
       await this.callTelegram("leaveChat", { chat_id: chat.id });
     }
     await storage.transaction(async txn => {
-      if (ownerAdded || !isMember) await txn.put("groupApproved", ownerAdded);
+      if (ownerAdded) await txn.put("groupApproved", true);
       await txn.put("groupAccessUpdate", event);
     });
   }

@@ -425,16 +425,17 @@ test("the webhook handles group additions and persists numeric owner approval", 
   assert.equal(f.calls.filter(call => call.method === "leaveChat").length, 1);
   await f.webhook({ update_id: 101, my_chat_member: membership(owner) });
   f.restart();
-  const [join] = await f.open();
+  await f.msg("/start@EndToStartBot", host);
+  const join = f.last().reply_markup.inline_keyboard[0][0].callback_data;
   await f.callback(join);
   assert.equal((await f.game()).players.length, 2);
+  const scores = await f.storage.get("scores");
   await f.webhook({ update_id: 102, my_chat_member: membership(owner, "member", "left") });
+  await f.webhook({ update_id: 103, my_chat_member: membership(impostor) });
   await f.msg("/mypoints");
-  assert.equal(await f.storage.get("groupApproved"), false);
-  await f.msg("/approvegroup", impostor);
-  assert.equal(await f.storage.get("groupApproved"), false);
-  await f.msg("/approvegroup", owner, Math.floor(f.now() / 1000) + 1, 103);
+  assert.equal(f.calls.filter(call => call.method === "leaveChat").length, 1);
   assert.equal(await f.storage.get("groupApproved"), true);
+  assert.deepEqual(await f.storage.get("scores"), scores);
 });
 
 test("preapproved groups are protected even if a non-owner adds the bot", async t => {

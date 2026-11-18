@@ -1,4 +1,4 @@
-const NO_HISTORY = "لا يوجد رصيد مرتبط بحسابك بعد. اكتب /mypoints في المجموعة التي لعبت فيها، ثم أعد الطلب هنا.";
+const NO_HISTORY = "لا توجد مجموعات مرتبطة برصيدك بعد. اكتب /mypoints في المجموعة التي لعبت فيها، ثم أعد الطلب هنا.";
 const UNAVAILABLE = "تعذّر قراءة رصيدك الآن. جرّب /mypoints مرة أخرى.";
 const MULTIPLE = "عندك أكثر من رصيد مختلف. اكتب /mypoints مرة في المجموعة التي تريد رصيدها، ثم أعد /mypoints هنا.";
 
@@ -49,19 +49,17 @@ export async function privatePointsMessage(env, user) {
   if (!found.length) return unavailable ? UNAVAILABLE : NO_HISTORY;
 
   // Never silently combine balances from distinct chat IDs, even if their titles match.
+  const nonzero = found.filter(row => row.score.points !== 0 || row.score.wins !== 0);
   const recent = found.filter(row => Number.isFinite(row.group.lastSeenAt) && row.group.lastSeenAt > 0)
     .sort((a, b) => b.group.lastSeenAt - a.group.lastSeenAt);
   let chosen;
-  if (recent.length && (recent.length === 1 || recent[0].group.lastSeenAt > recent[1].group.lastSeenAt)) {
+  // Prefer the only earned balance over a stray zero from an older or test group.
+  if (found.length === 1) chosen = found[0];
+  else if (nonzero.length === 1) chosen = nonzero[0];
+  else if (recent.length && (recent.length === 1 || recent[0].group.lastSeenAt > recent[1].group.lastSeenAt)) {
     chosen = recent[0];
-  } else if (found.length === 1) {
-    chosen = found[0];
   } else {
-    // Old links do not have lastSeenAt. A unique nonzero score avoids a misleading
-    // zero from an old duplicate-looking group; otherwise explicitly ask the user.
-    const nonzero = found.filter(row => row.score.points !== 0 || row.score.wins !== 0);
-    if (nonzero.length === 1 && !unavailable) chosen = nonzero[0];
-    else return unavailable ? UNAVAILABLE : MULTIPLE;
+    return unavailable ? UNAVAILABLE : MULTIPLE;
   }
   if (unavailable) return UNAVAILABLE; // No guessing while some balances are inaccessible.
   const display = playerName(user);

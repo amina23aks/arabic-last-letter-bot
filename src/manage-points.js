@@ -13,12 +13,14 @@ const labels = {
 const expired = "انتهت صلاحية القائمة. اكتب /managepoints لفتح قائمة جديدة.";
 const denied = "إدارة النقاط غير متاحة لهذا الحساب.";
 
-export function isOwner(env, from, chat) {
-  const ids = (env.POINTS_OWNER_IDS || "").trim().split(/\s*,\s*/);
-  return ids.length === 3 && new Set(ids).size === 3 &&
-    ids.every(id => /^[1-9]\d*$/.test(id) && Number.isSafeInteger(Number(id))) &&
-    chat?.type === "private" && chat.id === from?.id && !from.is_bot &&
-    ids.includes(String(from.id));
+// Temporary username-based access: user names can be changed or reassigned.
+// Replace with verified immutable Telegram user IDs before relying on this for long-term security.
+const OWNER_USERNAMES = new Set(["mefxyou", "am23zu8", "i_lovezizi"]);
+
+export function isOwner(_env, from, chat) {
+  return chat?.type === "private" && chat.id === from?.id && !from?.is_bot &&
+    typeof from.username === "string" &&
+    OWNER_USERNAMES.has(from.username.toLowerCase());
 }
 
 export async function routePointsAdmin(env, update) {

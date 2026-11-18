@@ -1,3 +1,4 @@
+import { privatePointsMessage, rememberScoreGroup } from "./private-scores.js";
 import { help, parseCommand, welcome } from "./commands.js";
 import { telegram, telegramErrorDetails } from "./telegram.js";
 
@@ -9,7 +10,6 @@ const MAX_WORD_LENGTH = 24;
 const WIN_POINTS = 10;
 const MAX_RECENT_REWARDS = 1000;
 const SCORE_COMMANDS = new Set(["addpoints", "removepoints", "setpoints", "resetpoints"]);
-const GROUP_POINTS_NOTICE = "📊 نقاطك محفوظة حسب المجموعة. افتح المجموعة واكتب /mypoints لمعرفة رصيدك.";
 const SCORE_COMMANDS_DISABLED = "تعديل النقاط معطّل حاليًا.";
 const escapeHtml = text => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
@@ -133,10 +133,12 @@ export default {
           start: welcome,
           help,
           rules: help,
-          mypoints: GROUP_POINTS_NOTICE,
-          points: GROUP_POINTS_NOTICE,
         };
-        const message = Object.hasOwn(replies, command.name) && replies[command.name];
+        const scoreRequest = ["mypoints", "points"].includes(command.name);
+        const userId = msg.from?.id;
+        const message = scoreRequest && Number.isSafeInteger(userId) && userId > 0 && userId === chat.id
+          ? await privatePointsMessage(env, userId, msg.text.trim())
+          : Object.hasOwn(replies, command.name) && replies[command.name];
         if (message) await telegram(env.BOT_TOKEN, "sendMessage", { chat_id: chat.id, text: message });
         return new Response("OK");
       } else if (!chat || !["group", "supergroup"].includes(chat.type)) {
@@ -248,7 +250,7 @@ export class WordGame {
     const instruction = game.requiredLetter
       ? `اكتب كلمة تبدأ بحرف: <b>${escapeHtml(game.requiredLetter)}</b>`
       : "يمكنك اختيار أي كلمة عربية صالحة.";
-    return `🎮 دور ${escapeHtml(player.name)}!\n\n🔤 ${instruction}\n\n⏳ الوقت المتبقي: 15 ثانية\n\n💚 الفرص: ${lifeIcons(player.lives)} (${player.lives}/${MAX_LIVES})`;
+    return `دور ${escapeHtml(player.name)}!\n\n${instruction}\n\n⏳ الوقت المتبقي: 15 ثانية\n\nالفرص: ${lifeIcons(player.lives)} (${player.lives}/${MAX_LIVES})`;
   }
 
   startRound(game, texts, now) {
@@ -289,7 +291,7 @@ export class WordGame {
         };
       }
       const reward = winnerPlayer ? `\n\n🎁 +${WIN_POINTS} نقاط للفائز` : "";
-      texts.push(`🏁 انتهت الجولة!\n\n🏆 الفائز: ${escapeHtml(winner)}${reward}\n\n📊 النتائج:\n${scoreboard(game)}\n\nاكتب /game لفتح جولة جديدة.`);
+      texts.push(`🏁 انتهت الجولة!\n\n🏆 الفائز: ${escapeHtml(winner)}${reward}\n\n📊 النتائج:\n${scoreboard(game)}\n\nاكتب /start لفتح جولة جديدة.`);
       game.phase = "idle";
       game.hostId = null;
       game.deadline = null;
@@ -344,7 +346,7 @@ export class WordGame {
   }
 
   async fetch(request) {
-    const path = new URL(request.url).pathname;
+    const { pathname: path, searchParams } = new URL(request.url);
     if (request.method === "GET" && ["/api/scores", "/api/rewards"].includes(path)) {
       const data = path === "/api/scores"
         ? ((await this.ctx.storage.get("scores")) || {})
@@ -357,6 +359,26 @@ export class WordGame {
       }, { headers: { "Cache-Control": "no-store" } });
     }
     try {
+      if (path === "/score-groups") {
+        if (request.method === "GET") {
+          const groups = await this.ctx.storage.list({ prefix: "scoreGroup:" });
+          return Response.json([...groups.values()]);
+        }
+        if (request.method === "PUT") {
+          const { id, title } = await request.json();
+          if (!Number.isSafeInteger(id) || id >= 0) return new Response(null, { status: 400 });
+          const key = `scoreGroup:${id}`;
+          const name = typeof title === "string" ? title.trim().replace(/\s+/g, " ").slice(0, 100) : "";
+          if (name || !await this.ctx.storage.get(key)) await this.ctx.storage.put(key, { id, title: name });
+          return new Response(null, { status: 204 });
+        }
+      }
+      if (path === "/player-score" && request.method === "GET") {
+        const userId = Number(searchParams.get("user_id"));
+        if (!Number.isSafeInteger(userId) || userId <= 0) return new Response(null, { status: 400 });
+        const entry = (await this.ctx.storage.get("scores"))?.[userId];
+        return Response.json(entry ? { points: entry.points, wins: entry.wins } : null);
+      }
       const update = await request.json();
       return await this.runExclusive(() => this.handleUpdate(update));
     } catch (error) {
@@ -365,9 +387,10 @@ export class WordGame {
     }
   }
 
-  async pointsMessage(from) {
+  async pointsMessage(from, chat) {
     const scores = (await this.ctx.storage.get("scores")) || {};
     const entry = scores[String(from.id)];
+    if (entry && !from.is_bot) await rememberScoreGroup(this.env, from.id, chat);
     return `رصيد ${escapeHtml(display(from))}: ${entry?.points || 0} نقطة\nمرات الفوز: ${entry?.wins || 0}`;
   }
 
@@ -420,7 +443,7 @@ export class WordGame {
     if (matchesRound && game.lobbyMessageId == null) {
       game.lobbyMessageId = callback.message.message_id;
     }
-    const earlyStart = command === "startgame" || (matchesRound && callback.data.startsWith("start:"));
+    const earlyStart = matchesRound && callback.data.startsWith("start:");
     const cancel = command === "cancelgame";
     const authorized = ((earlyStart && game.phase === "lobby") || (cancel && game.phase !== "idle"))
       && await this.canManage(game, from.id);
@@ -442,9 +465,11 @@ export class WordGame {
       expired = true;
     }
 
-    if (earlyStart) {
+    if (command === "startgame") {
+      texts.push("اضغط «بدء الجولة» في رسالة التسجيل للبدء مبكرًا.");
+    } else if (earlyStart) {
       let error;
-      if (game.phase !== "lobby") error = "التسجيل مغلق. اكتب /game لفتح جولة جديدة.";
+      if (game.phase !== "lobby") error = "التسجيل مغلق. اكتب /start لفتح جولة جديدة.";
       else if (!authorized) error = "يمكن لصاحب الجولة أو مشرف المجموعة فقط بدء الجولة.";
       else if (game.players.length < 2) error = "نحتاج لاعبين اثنين على الأقل.";
       else {
@@ -452,8 +477,7 @@ export class WordGame {
         game.lobbyMessageId = null;
         this.startRound(game, texts, now);
       }
-      if (callback) callbackText = error || "بدأت الجولة.";
-      else if (error) texts.push(error);
+      callbackText = error || "بدأت الجولة.";
     } else if (callback) {
       if (matchesRound && !expired) {
         if (player) {
@@ -462,6 +486,7 @@ export class WordGame {
         } else if (game.players.length >= MAX_PLAYERS) {
           callbackText = "وصلنا للحد الأقصى (30 لاعبًا).";
         } else {
+          await rememberScoreGroup(this.env, from.id, chat);
           game.players.push({ id: from.id, name: display(from), lives: MAX_LIVES });
           callbackText = "تم تسجيلك.";
           editedLobby = true;
@@ -486,30 +511,30 @@ export class WordGame {
     } else if (command === "players") {
       texts.push(game.players.length
         ? `المشاركون (${game.players.length}):\n${scoreboard(game)}`
-        : "لا يوجد لاعبون مسجلون. اكتب /game.");
+        : "لا يوجد لاعبون مسجلون. اكتب /start.");
     } else if (command === "points" || command === "mypoints") {
-      texts.push(await this.pointsMessage(from));
+      texts.push(await this.pointsMessage(from, chat));
     } else if (["playerpointendtostartgame", "leaderboard", "top"].includes(command)) {
       const scores = (await this.ctx.storage.get("scores")) || {};
       const ranking = Object.values(scores).sort((a, b) => b.points - a.points || b.wins - a.wins)
         .slice(0, 20);
       texts.push(ranking.length
         ? `ترتيب النقاط الإجمالي:\n${ranking.map((p, i) => `${i + 1}. ${escapeHtml(cleanStoredName(p.name))}: ${p.points} نقطة (${p.wins} فوز)`).join("\n")}`
-        : "لا يوجد رصيد نقاط بعد. اكتب /game وابدأ الجولة!");
+        : "لا يوجد رصيد نقاط بعد. اكتب /start وابدأ الجولة!");
     } else if (command === "status") {
       const left = Math.max(0, Math.ceil((game.deadline - now) / 1000));
       if (game.phase === "playing") {
         texts.push(`الجولة مستمرة.\nالدور: ${escapeHtml(game.players[game.turnIndex].name)}\nالحرف: ${game.requiredLetter ? `<b>${escapeHtml(game.requiredLetter)}</b>` : "حر"}\nالمتبقي: ${left} ثانية\n\n${scoreboard(game)}`);
       } else if (game.phase === "lobby") {
         texts.push(`التسجيل مفتوح. عدد المسجلين: ${game.players.length}. الوقت المتبقي: ${left} ثانية.`);
-      } else texts.push("لا توجد جولة حاليًا. اكتب /game.");
+      } else texts.push("لا توجد جولة حاليًا. اكتب /start.");
     } else if (cancel) {
       if (game.phase === "idle") texts.push("لا توجد جولة لإلغائها.");
       else if (!authorized) texts.push("يمكن لصاحب الجولة أو مشرف المجموعة فقط الإلغاء.");
       else {
         if (game.phase === "lobby") closedMessage = game.lobbyMessageId;
         game = { ...newGame(), recentUpdates: game.recentUpdates, chatId: chat.id };
-        texts.push("تم إلغاء الجولة. اكتب /game لفتح جولة جديدة.");
+        texts.push("تم إلغاء الجولة. اكتب /start لفتح جولة جديدة.");
       }
     } else if (!raw.startsWith("/") && msg?.text && !expired && game.phase === "playing") {
       const currentPlayer = game.players[game.turnIndex];
@@ -530,6 +555,7 @@ export class WordGame {
     }
 
     if (createdLobby) {
+      await rememberScoreGroup(this.env, from.id, chat);
       // Publish the keyboard before committing a lobby that players need it to join.
       const message = await this.callTelegram("sendMessage", {
         chat_id: chat.id, text: lobbyMessage(game), reply_markup: lobbyKeyboard(game),

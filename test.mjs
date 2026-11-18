@@ -348,8 +348,7 @@ test("private points read only the caller's current balances from indexed groups
   const otherStorage = f.bindings.get(String(other.id)).ctx.storage;
   await otherStorage.put("scores", { 10: { ...oldScores[10], points: 70, wins: 7 } });
   await privateMessage("/mypoints");
-  assert.match(f.last().text, /مجموعة <أ>: 40 نقطة، مرات الفوز: 4/);
-  assert.match(f.last().text, /مجموعة ب: 70 نقطة، مرات الفوز: 7/);
+  assert.equal(f.last().text, "📊 نقاطك\n\n👤 آمنة: 70 نقطة\n\n🏆 مرات الفوز: 7");
   assert.doesNotMatch(f.last().text, /90 نقطة|110 نقطة/);
   assert.deepEqual(await f.storage.get("scores"), oldScores);
 });

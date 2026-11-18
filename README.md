@@ -152,26 +152,28 @@ This update uses the existing production Worker `arabic-last-letter-game`, `GAME
 use separate object names in the same binding. Balances remain under the group's existing
 `scores` key. No data migration is required.
 
-### Enable private administration
+### Enable private administration (temporary username-based setup)
 
-1. Verify the three owners through a trusted channel you already use for each person.
-   Ask each owner to send `/mytelegramid` privately to @EndToStartBot and show the bot reply live
-   while you verify the account they are signed into. An account ID visible to a trusted
-   operator in an authenticated Telegram client is also sufficient. A username, forwarded
-   message, or standalone screenshot is insufficient. The command only displays the signed-in
-   sender's ID. It is available once this version is live and grants no access by itself.
-2. In the production Worker's **Settings → Variables and Secrets**, set the secret
-   `POINTS_OWNER_IDS` to the three verified numeric IDs separated by commas.
-   The intended accounts are @mefxyou, @Am23zu8, and @i_lovezizi. Keep their verified
-   mapping with the operator. Missing, malformed, duplicate, or incomplete configuration
-   disables the menu. Ordinary group play needs no owner configuration.
-3. An owner types `/managepoints` in private. To make an older group appear in the selector,
-   have someone issue `/leaderboard` there once. The player list includes every stored score
-   entry, with numeric IDs to distinguish identical names. All adjustments apply to one
-   player, require confirmation within five minutes, and write an audit entry in that
-   group's durable storage under `pointsAdminAudit:`. The entry contains the actor, player,
-   group, operation, timestamp, and before/after balances. Manual adjustments leave earned
-   reward events intact.
+For this temporary setup, only Telegram accounts whose current **usernames** match
+`@mefxyou`, `@Am23zu8`, or `@i_lovezizi` (case-insensitive) can use
+`/managepoints` in a private conversation with @EndToStartBot. No
+`POINTS_OWNER_IDS`, `ADMIN_USER_IDS`, or `APPROVED_GROUP_IDS` setup is required for
+this feature; `POINTS_OWNER_IDS` is ignored by this temporary version.
+
+**Security caveat:** Telegram usernames can be changed or reassigned. If one of
+these usernames is transferred to another account, that account will inherit
+points-management access. This is not suitable for long-term authorization or
+sensitive/high-value operations. Switch to verified numeric Telegram user IDs
+before relying on it for production security.
+
+An owner types `/managepoints` in private. To make an older group appear in the
+selector, have someone issue `/leaderboard` in that group first. The private
+menu allows adjusting one player's points at a time, requires confirmation,
+and writes an audit record; resetting points can optionally reset wins too.
+
+Ordinary group play is not restricted to these three owners. This change does
+not register `/managepoints` in the general command menus, and does not affect
+Cloudflare deployment or webhook configuration.
 
 A historical player who has no private association should run `/mypoints` once in each group
 with saved scores and then retry in private. This works without starting a new round or

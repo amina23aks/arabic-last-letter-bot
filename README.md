@@ -144,3 +144,58 @@ npm test
 ```
 
 تغطي الاختبارات التسجيل والأوامر، المهل وقواعد الكلمات، أشكال الفرص، منح 10 نقاط مرة واحدة، وتوافق الأرصدة المخزنة. تحاكي الاختبارات واجهة Telegram محليًا.
+
+## 10) Private owner setup and release checks
+
+This update uses the existing production Worker `arabic-last-letter-game`, `GAMES` binding,
+`WordGame` class, migration `v1`, and numeric group chat IDs. The directory and owner sessions
+use separate object names in the same binding. Balances remain under the group's existing
+`scores` key. No data migration is required.
+
+### Enable private administration
+
+1. Verify the three owners through a trusted channel you already use for each person.
+   Ask each owner to send `/mytelegramid` privately to @EndToStartBot and show the bot reply live
+   while you verify the account they are signed into. An account ID visible to a trusted
+   operator in an authenticated Telegram client is also sufficient. A username, forwarded
+   message, or standalone screenshot is insufficient. The command only displays the signed-in
+   sender's ID. It is available once this version is live and grants no access by itself.
+2. In the production Worker's **Settings → Variables and Secrets**, set the secret
+   `POINTS_OWNER_IDS` to the three verified numeric IDs separated by commas.
+   The intended accounts are @mefxyou, @Am23zu8, and @i_lovezizi. Keep their verified
+   mapping with the operator. Missing, malformed, duplicate, or incomplete configuration
+   disables the menu. Ordinary group play needs no owner configuration.
+3. An owner types `/managepoints` in private. To make an older group appear in the selector,
+   have someone issue `/leaderboard` there once. The player list includes every stored score
+   entry, with numeric IDs to distinguish identical names. All adjustments apply to one
+   player, require confirmation within five minutes, and write an audit entry in that
+   group's durable storage under `pointsAdminAudit:`. The entry contains the actor, player,
+   group, operation, timestamp, and before/after balances. Manual adjustments leave earned
+   reward events intact.
+
+A historical player who has no private association should run `/mypoints` once in each group
+with saved scores and then retry in private. This works without starting a new round or
+changing the balance. If an old group is inaccessible or its Telegram chat ID changed, the
+bot cannot reconstruct its former chat ID or associate those scores automatically.
+
+### Verify the production release
+
+- Before merging, run `npm test` and `npm run check`. Keep the existing main-branch
+  Cloudflare deployment connected to the production Worker. Compare its dashboard bindings
+  with `wrangler.toml` and confirm that `GAMES` targets the existing `WordGame` namespace.
+- After the approved merge deploys, check the Worker root for its health response. In an
+  authorized Telegram Bot API session, call `getMe` and `getWebhookInfo` using the production
+  token. Confirm the bot is @EndToStartBot, the URL is the existing Worker URL followed by
+  `/webhook`, and the webhook receives `message` and `callback_query` updates. If there is an
+  explicit allowlist, both must be present. Telegram does not return the webhook secret.
+  Verify it by sending commands and tapping an inline button successfully. Keep the token
+  out of shared logs. These checks do not require re-registering the webhook.
+- Run `npm run register-commands` with the production token after deployment. The script
+  replaces the group, group-administrator, and private lists and deletes the obsolete
+  default list. Telegram cannot enumerate other configured scope/language pairs. If you
+  know of old overrides, supply the exact pairs using `OBSOLETE_COMMAND_SCOPES`, for
+  example `'[{"scope":{"type":"all_private_chats"},"language_code":"ar"}]'`.
+- For a player with an existing record, compare group and private `/mypoints`, including
+  another group if available. Try `/managepoints` as a regular account and as a verified
+  owner. Use a disposable player score for a confirmed adjustment, repeat the confirmation,
+  and check `/mypoints` and `/leaderboard`. Open and play an ordinary group round.

@@ -33,6 +33,7 @@ class Storage {
 function fixture(t) {
   const storage = new Storage();
   const calls = [];
+  let telegramFailure;
   let now = 1_800_000_000_000;
   let updateId = 0;
   let messageId = 0;
@@ -42,6 +43,7 @@ function fixture(t) {
     const method = new URL(url).pathname.split("/").at(-1);
     const body = JSON.parse(options.body);
     calls.push({ method, ...body });
+    if (telegramFailure) return telegramFailure(method, body);
     const result = method === "getChatMember"
       ? { status: body.user_id === admin.id ? "administrator" : "member" }
       : { message_id: ++messageId };
@@ -75,8 +77,16 @@ function fixture(t) {
     await msg("/game");
     return last().reply_markup.inline_keyboard[0].map(button => button.callback_data);
   };
+  function webhook(update, bindings = { idFromName: String, get: () => object }) {
+    return worker.fetch(new Request("https://worker/webhook", {
+      method: "POST",
+      headers: { "X-Telegram-Bot-Api-Secret-Token": env.WEBHOOK_SECRET },
+      body: JSON.stringify(update),
+    }), { ...env, GAMES: bindings });
+  }
+
   const restart = () => { object = new WordGame({ storage }, env); };
-  return { storage, calls, game, msg, callback, open, at, alarm, expire, last, restart, now: () => now };
+  return { storage, calls, game, webhook, failTelegram: handler => { telegramFailure = handler; }, msg, callback, open, at, alarm, expire, last, restart, now: () => now };
 }
 
 test("registration deadline, buttons, edits, duplicate joins and cancellation", async t => {
@@ -228,33 +238,105 @@ test("timeouts, replay, scoring, aliases, and legacy scores survive recreation",
   assert.ok(points.includes(`مرات الفوز: ${scores[user.id].wins}`));
   await f.msg("/points", user);
   assert.equal(f.last().text, points);
-  await f.msg("/leaderboard");
+  await f.msg("/playerpointendtostartgame");
   assert.match(f.last().text, /1\. قديم: 70 نقطة/);
   assert.doesNotMatch(f.last().text, /@old_account/);
+  const leaderboard = f.last().text;
+  await f.msg("/leaderboard");
+  assert.equal(f.last().text, leaderboard);
   const object = new WordGame({ storage: f.storage }, env);
   const response = await object.fetch(new Request("https://internal/api/scores"));
   assert.equal((await response.json()).data.find(row => row.user_id === winner.id).points, scores[winner.id].points);
 });
 
-test("welcome, help, rules and private start through the webhook", async t => {
+test("webhook routes group /start, registers the host, and updates the player list", async t => {
   const f = fixture(t);
-  await f.msg("/start");
-  assert.match(f.last().text, /أهلًا بك/);
-  await f.msg("/help");
-  assert.match(f.last().text, /\/cancelgame/);
-  await f.msg("/rules");
-  assert.match(f.last().text, /15 ثانية.*3 فرص.*10 نقاط/);
-  const response = await worker.fetch(new Request("https://worker/webhook", {
-    method: "POST",
-    headers: { "X-Telegram-Bot-Api-Secret-Token": env.WEBHOOK_SECRET },
-    body: JSON.stringify({ message: { chat: { id: host.id, type: "private" }, from: host, text: "/start" } }),
-  }), env);
-  assert.equal(response.status, 200);
-  assert.match(f.last().text, /أهلًا بك/);
-  assert.equal(f.last().chat_id, host.id);
+  const routeNames = [];
+  const dispatch = (text, update_id) => f.webhook({ update_id, message: { chat, from: host, text } }, {
+    idFromName(name) { routeNames.push(name); return name; },
+    get(id) {
+      assert.equal(id, String(chat.id));
+      return new WordGame({ storage: f.storage }, env);
+    },
+  });
+
+  await dispatch("/start@OtherBot", 100);
+  assert.equal(await f.game(), undefined);
+  assert.equal((await dispatch("/start@EndToStartBot", 101)).status, 200);
+  const lobby = await f.game();
+  assert.equal(lobby.hostId, host.id);
+  assert.deepEqual(lobby.players.map(player => player.id), [host.id]);
+  assert.equal(lobby.deadline, f.now() + 120_000);
+  assert.match(f.last().text, /1\. آمنة/);
+  const [join, start] = f.last().reply_markup.inline_keyboard[0].map(button => button.callback_data);
+  const beforeReplay = f.calls.length;
+  await dispatch("/start@EndToStartBot", 101);
+  assert.equal(f.calls.length, beforeReplay);
+  await dispatch("/start", 102);
+  assert.match(f.last().text, /بالفعل/);
+  assert.equal((await f.game()).roundId, lobby.roundId);
+  await f.callback(join, second, lobby.lobbyMessageId);
+  assert.match(f.last("editMessageText").text, /2\. صنارة صيد <>&/);
+  await f.callback(start, host, lobby.lobbyMessageId);
+  assert.equal((await f.game()).phase, "playing");
+  assert.equal(f.storage.alarmAt, f.now() + 15_000);
+  assert.match(f.last().text, /أي كلمة عربية صالحة/);
+  assert.deepEqual(routeNames, Array(4).fill(String(chat.id)));
 });
 
-test("registration script replaces the same group command list on repeated runs", async t => {
+test("private /start welcomes, help covers gameplay, and /mypoints reads existing scores", async t => {
+  const f = fixture(t);
+  const privateChat = { id: host.id, type: "private" };
+  const send = (chat, text) => f.webhook({ message: { chat, from: host, text } });
+  await send(privateChat, "/start");
+  assert.match(f.last().text, /أهلًا بك/);
+  assert.equal(f.last().chat_id, host.id);
+  assert.equal(await f.game(), undefined);
+  await send(privateChat, "/help");
+  assert.match(f.last().text, /120 ثانية[\s\S]*15 ثانية[\s\S]*3 فرص[\s\S]*10 نقاط/);
+  const privateStorage = new Storage();
+  const privateScores = { 10: { user_id: host.id, name: host.first_name, points: 20, wins: 2 } };
+  const groupScores = { 10: { user_id: host.id, name: host.first_name, points: 40, wins: 4 } };
+  await privateStorage.put("scores", privateScores);
+  await f.storage.put("scores", groupScores);
+  for (const [context, scores] of [[privateChat, privateScores], [chat, groupScores]]) {
+    const selected = [];
+    const response = await f.webhook({ message: { chat: context, from: host, text: "/mypoints@EndToStartBot" } }, {
+      idFromName(name) { selected.push(name); return name; },
+      get(id) {
+        const storage = id === String(privateChat.id) ? privateStorage : f.storage;
+        return new WordGame({ storage }, env);
+      },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(selected, [String(context.id)]);
+    assert.equal(f.last().chat_id, context.id);
+    assert.ok(f.last().text.includes(`${scores[host.id].points} نقطة\nمرات الفوز: ${scores[host.id].wins}`));
+  }
+  assert.deepEqual(await f.storage.get("scores"), groupScores);
+  assert.deepEqual(await privateStorage.get("scores"), privateScores);
+  assert.equal(await privateStorage.get("game"), undefined);
+});
+
+test("a failed lobby message is logged safely and the same webhook can retry", async t => {
+  const f = fixture(t);
+  const error = t.mock.method(console, "error", () => {});
+  const update = { update_id: 100, message: { chat, from: host, text: "/start" } };
+  f.failTelegram(() => Response.json({
+    ok: false, error_code: 403, description: `Sensitive: ${env.BOT_TOKEN}`,
+  }, { status: 403 }));
+  assert.equal((await f.webhook(update)).status, 500);
+  assert.equal(await f.game(), undefined);
+  assert.equal(f.storage.alarmAt, null);
+  assert.deepEqual(error.mock.calls[0].arguments[1], {
+    message: "Telegram sendMessage failed", status: 403, telegramCode: 403,
+  });
+  f.failTelegram(null);
+  assert.equal((await f.webhook(update)).status, 200);
+  assert.equal((await f.game()).phase, "lobby");
+});
+
+test("registration script replaces the scoped command lists on repeated runs", async t => {
   const token = process.env.BOT_TOKEN;
   const requests = [];
   process.env.BOT_TOKEN = env.BOT_TOKEN;
@@ -271,14 +353,17 @@ test("registration script replaces the same group command list on repeated runs"
     if (token === undefined) delete process.env.BOT_TOKEN;
     else process.env.BOT_TOKEN = token;
   }
-  assert.deepEqual(requests.slice(0, 2), requests.slice(2));
-  const [method, registration] = requests[1];
-  assert.equal(method, "setMyCommands");
-  assert.deepEqual(registration.scope, { type: "all_group_chats" });
-  assert.deepEqual(registration.commands.map(entry => entry.command), [
-    "game", "startgame", "mypoints", "points", "leaderboard", "rules", "help", "cancelgame", "start",
-  ]);
-  assert.ok(registration.commands.every(entry => /\p{Script=Arabic}/u.test(entry.description)));
+  assert.deepEqual(requests.slice(0, 3), requests.slice(3));
+  assert.equal(requests[0][0], "getMe");
+  const expected = {
+    all_group_chats: ["start", "mypoints", "playerpointendtostartgame", "help"],
+    all_private_chats: ["start", "mypoints", "help"],
+  };
+  for (const [method, registration] of requests.slice(1, 3)) {
+    assert.equal(method, "setMyCommands");
+    assert.deepEqual(registration.commands.map(entry => entry.command), expected[registration.scope.type]);
+    assert.ok(registration.commands.every(entry => /\p{Script=Arabic}/u.test(entry.description)));
+  }
 });
 
 test("an existing untimed lobby can use its old join button after upgrade", async t => {

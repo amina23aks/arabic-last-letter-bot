@@ -1,20 +1,23 @@
-export const commands = [
-  { command: "game", description: "افتح التسجيل لجولة جديدة لمدة دقيقتين" },
-  { command: "startgame", description: "ابدأ الجولة مبكرًا بعد تسجيل لاعبين على الأقل" },
-  { command: "mypoints", description: "اعرض رصيد نقاطك وعدد مرات فوزك" },
-  { command: "points", description: "اعرض رصيد نقاطك وعدد مرات فوزك" },
-  { command: "leaderboard", description: "اعرض ترتيب النقاط في المجموعة" },
-  { command: "rules", description: "اعرض قواعد لعبة آخر حرف" },
-  { command: "help", description: "اعرض الأوامر وطريقة اللعب" },
-  { command: "cancelgame", description: "ألغِ التسجيل أو الجولة الحالية" },
-  { command: "start", description: "اعرض رسالة الترحيب" },
+const startGroup = { command: "start", description: "فتح التسجيل لجولة جديدة" };
+const myPoints = { command: "mypoints", description: "عرض نقاطي" };
+const leaderboard = { command: "playerpointendtostartgame", description: "ترتيب نقاط اللاعبين" };
+const helpCommand = { command: "help", description: "شرح اللعبة والأوامر" };
+
+export const groupCommands = [startGroup, myPoints, leaderboard, helpCommand];
+export const privateCommands = [
+  { command: "start", description: "الترحيب" },
+  myPoints,
+  helpCommand,
 ];
 
-export const welcome = "أهلًا بك في لعبة آخر حرف! أضف البوت إلى مجموعة واكتب /game لفتح التسجيل. استخدم /help لعرض الأوامر و/rules لمعرفة القواعد. عطّل وضع الخصوصية للبوت ليقرأ كلمات اللاعبين.";
+export const welcome = "أهلًا بك في لعبة آخر حرف! أضف البوت إلى مجموعة واكتب /start لفتح التسجيل. استخدم /help لمعرفة طريقة اللعب.";
 
-export const rules = "تبدأ الجولة بأي كلمة عربية صالحة. على كل لاعب أن يكتب كلمة تبدأ بآخر حرف من الكلمة السابقة، دون تكرار. لكل دور 15 ثانية ولكل لاعب 3 فرص. عند انتهاء الوقت تُخصم فرصة، ويخرج اللاعب عند نفاد فرصه. آخر لاعب يبقى يفوز ويحصل على 10 نقاط محفوظة في المجموعة.";
-
-export const help = `اكتب /game في المجموعة ثم اضغط زر الانضمام. يغلق التسجيل بعد دقيقتين.\n\n${commands.map(({ command, description }) => `/${command} — ${description}`).join("\n")}`;
+export const help = [
+  "اكتب /start في المجموعة لفتح التسجيل لمدة 120 ثانية، ثم اضغط «انضمام للجولة» للمشاركة. يمكن لصاحب الجولة أو مشرف المجموعة الضغط على «بدء الجولة» بعد تسجيل لاعبين على الأقل، وإلا يبدأ اللعب تلقائيًا عند انتهاء التسجيل إذا اكتمل العدد.",
+  "لكل دور 15 ثانية، ولكل لاعب 3 فرص. يبدأ اللاعب الأول بأي كلمة عربية صالحة. يجب أن تبدأ كل كلمة بآخر حرف من الكلمة السابقة، ويُمنع تكرار الكلمات.",
+  "عند انتهاء الوقت تُخصم فرصة. يخرج اللاعب عند نفاد فرصه، ويفوز آخر لاعب يبقى بـ10 نقاط.",
+  "/mypoints — عرض نقاطي\n/playerpointendtostartgame — ترتيب نقاط اللاعبين في المجموعة",
+].join("\n\n");
 
 export function parseCommand(text) {
   const match = /^\/(\w+)(?:@(\w+))?(?:\s|$)/.exec(text);
